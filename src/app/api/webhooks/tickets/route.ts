@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { Prisma } from "@prisma/client"
 import { db } from "@/lib/db"
 import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { notifyN8nEvent } from "@/lib/n8n-notify"
@@ -44,12 +45,29 @@ export async function POST(req: NextRequest) {
       residentEmail,
       residentPhone,
       unitCode,
+      unitName,
+      buildingNumber,
+      projectName,
       title,
       description,
       priority
     } = body
 
-    if (!residentName || !unitCode || !title || !description) {
+    const trimmedResidentName = typeof residentName === "string" ? residentName.trim() : ""
+    const trimmedTitle = typeof title === "string" ? title.trim() : ""
+    const trimmedDescription = typeof description === "string" ? description.trim() : ""
+    const trimmedProjectName = typeof projectName === "string" ? projectName.trim() : ""
+    const trimmedUnitCode =
+      typeof unitCode === "string" && unitCode.trim() !== "" ? unitCode.trim() : undefined
+    const trimmedBuildingNumber =
+      typeof buildingNumber === "string" && buildingNumber.trim() !== ""
+        ? buildingNumber.trim()
+        : undefined
+    const trimmedUnitName =
+      typeof unitName === "string" && unitName.trim() !== "" ? unitName.trim() : undefined
+    const requestedUnitCode = trimmedUnitCode ?? trimmedBuildingNumber
+
+    if (!trimmedResidentName || !trimmedTitle || !trimmedDescription) {
       await logWebhookEvent(
         auth.context.keyId,
         "TICKET_CREATED",
@@ -58,27 +76,169 @@ export async function POST(req: NextRequest) {
         400,
         body,
         { error: "Missing required fields" },
-        "Missing: residentName, unitCode, title, or description",
+        "Missing: residentName, title, or description",
         ipAddress
       )
 
       return NextResponse.json(
         {
-          error: "Missing required fields: residentName, unitCode, title, description"
+          error: "Missing required fields: residentName, title, description"
         },
         { status: 400 }
       )
+    }
+
+    if (!requestedUnitCode && !trimmedUnitName) {
+      await logWebhookEvent(
+        auth.context.keyId,
+        "TICKET_CREATED",
+        "/api/webhooks/tickets",
+        "POST",
+        400,
+        body,
+        { error: "Missing unit information" },
+        "Missing unit identifier (unitCode/buildingNumber or unitName)",
+        ipAddress
+      )
+
+      return NextResponse.json(
+        {
+          error: "Missing unit details. Please provide building number or unit name."
+        },
+        { status: 400 }
+      )
+    }
+
+    // Resolve project if provided
+    let project: { id: string; name: string } | null = null
+    if (trimmedProjectName) {
+      project = await db.project.findFirst({
+        where: { name: trimmedProjectName },
+        select: { id: true, name: true }
+      })
+
+      if (!project) {
+        const fallbackProject = await db.$queryRaw<{ id: string; name: string }[]>(
+          Prisma.sql`SELECT "id", "name" FROM "Project" WHERE LOWER("name") = LOWER(${trimmedProjectName}) LIMIT 1`
+        )
+
+        if (fallbackProject.length > 0) {
+          project = fallbackProject[0]
+        }
+      }
+
+      if (!project) {
+        return NextResponse.json(
+          {
+            error: "Project not found",
+            requestedName: trimmedProjectName
+          },
+          { status: 404 }
+        )
+      }
+    }
+
+    // Resolve unit by code/name within optional project scope
+    let unit: Awaited<ReturnType<typeof db.operationalUnit.findFirst>> | null = null
+
+    if (requestedUnitCode) {
+      unit = await db.operationalUnit.findFirst({
+        where: {
+          code: requestedUnitCode,
+          ...(project ? { projectId: project.id } : {})
+        },
+        include: { project: true }
+      })
+
+      if (!unit && project) {
+        const fallbackUnit = await db.$queryRaw<{ id: string }[]>(
+          Prisma.sql`
+            SELECT "id" FROM "OperationalUnit"
+            WHERE LOWER("code") = LOWER(${requestedUnitCode})
+              AND "projectId" = ${project.id}
+            LIMIT 1
+          `
+        )
+
+        if (fallbackUnit.length > 0) {
+          unit = await db.operationalUnit.findUnique({
+            where: { id: fallbackUnit[0].id },
+            include: { project: true }
+          })
+        }
+      }
+    }
+
+    if (!unit && trimmedUnitName) {
+      unit = await db.operationalUnit.findFirst({
+        where: {
+          name: trimmedUnitName,
+          ...(project ? { projectId: project.id } : {})
+        },
+        include: { project: true }
+      })
+
+      if (!unit && project) {
+        const fallbackUnitByName = await db.$queryRaw<{ id: string }[]>(
+          Prisma.sql`
+            SELECT "id" FROM "OperationalUnit"
+            WHERE LOWER("name") = LOWER(${trimmedUnitName})
+              AND "projectId" = ${project.id}
+            LIMIT 1
+          `
+        )
+
+        if (fallbackUnitByName.length > 0) {
+          unit = await db.operationalUnit.findUnique({
+            where: { id: fallbackUnitByName[0].id },
+            include: { project: true }
+          })
+        }
+      }
+    }
+
+    if (!unit) {
+      await logWebhookEvent(
+        auth.context.keyId,
+        "TICKET_CREATED",
+        "/api/webhooks/tickets",
+        "POST",
+        404,
+        body,
+        { error: "Unit not found" },
+        "Unable to resolve unit from provided details",
+        ipAddress
+      )
+
+      return NextResponse.json(
+        {
+          error: "Unable to find the specified unit",
+          details: {
+            project: trimmedProjectName || null,
+            unitCode: requestedUnitCode || null,
+            unitName: trimmedUnitName || null
+          }
+        },
+        { status: 404 }
+      )
+    }
+
+    if (!project) {
+      project = unit.projectId
+        ? await db.project.findUnique({
+            where: { id: unit.projectId },
+            select: { id: true, name: true }
+          })
+        : null
     }
 
     // Find or create resident
     let resident = await db.resident.findFirst({
       where: {
         AND: [
-          { name: residentName },
+          { name: trimmedResidentName },
           {
-            unit: {
-              code: unitCode
-            }
+            unitId: unit.id
           }
         ]
       },
@@ -92,37 +252,9 @@ export async function POST(req: NextRequest) {
     })
 
     if (!resident) {
-      // Try to find unit
-      const unit = await db.operationalUnit.findFirst({
-        where: { code: unitCode },
-        include: {
-          project: true
-        }
-      })
-
-      if (!unit) {
-        await logWebhookEvent(
-          auth.context.keyId,
-          "TICKET_CREATED",
-          "/api/webhooks/tickets",
-          "POST",
-          404,
-          body,
-          { error: "Unit not found" },
-          `Unit with code ${unitCode} not found`,
-          ipAddress
-        )
-
-        return NextResponse.json(
-          { error: `Unit with code ${unitCode} not found` },
-          { status: 404 }
-        )
-      }
-
-      // Create resident
       resident = await db.resident.create({
         data: {
-          name: residentName,
+          name: trimmedResidentName,
           email: residentEmail || null,
           phone: residentPhone || null,
           unitId: unit.id,
@@ -159,12 +291,12 @@ export async function POST(req: NextRequest) {
     // Create ticket
     const ticket = await db.ticket.create({
       data: {
-        title,
-        description,
+        title: trimmedTitle,
+        description: trimmedDescription,
         priority: priority || "Normal",
         status: "NEW",
         residentId: resident!.id,
-        unitId: resident!.unit.id
+        unitId: unit.id
       }
     })
 
@@ -185,16 +317,16 @@ export async function POST(req: NextRequest) {
     await notifyN8nEvent("TICKET_CREATED", {
       ticket: {
         id: ticket.id,
-        title,
-        description,
+        title: trimmedTitle,
+        description: trimmedDescription,
         priority: priority || "Normal",
         status: "NEW"
       },
       unit: {
-        id: resident!.unit.id,
-        code: resident!.unit.code,
-        name: resident!.unit.name,
-        project: resident!.unit.project?.name ?? null
+        id: unit.id,
+        code: unit.code,
+        name: unit.name,
+        project: project?.name ?? null
       },
       resident: {
         id: resident!.id,

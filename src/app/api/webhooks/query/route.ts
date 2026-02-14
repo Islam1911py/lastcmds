@@ -20,7 +20,10 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url)
     const queryType = searchParams.get("type") || "DEFAULT"
     const senderPhone = searchParams.get("senderPhone")
+    const projectNameParamRaw = searchParams.get("projectName")
+    const projectNameParam = projectNameParamRaw ? projectNameParamRaw.trim() : null
 
+    let resolvedProjectId: string | null = null
     let requestingUser: null | {
       id: string
       role: string
@@ -64,13 +67,59 @@ export async function GET(req: NextRequest) {
       }
 
       if (auth.context.role === "PROJECT_MANAGER") {
-        const projectIdParam = searchParams.get("projectId") || auth.context.projectId
-        if (!projectIdParam) {
-          const assignedProjects = requestingUser.assignedProjects.map((assignment) => ({
-            id: assignment.project?.id ?? assignment.projectId,
-            name: assignment.project?.name ?? assignment.projectId
-          }))
+        const assignedProjects = requestingUser.assignedProjects.map((assignment) => ({
+          id: assignment.project?.id ?? assignment.projectId,
+          name: assignment.project?.name ?? assignment.projectId
+        }))
 
+        const projectIdParamRaw = searchParams.get("projectId")
+        const projectIdParam = projectIdParamRaw ? projectIdParamRaw.trim() : null
+        resolvedProjectId = projectIdParam || auth.context.projectId || null
+
+        if (!resolvedProjectId && projectNameParam) {
+          const normalizedName = projectNameParam.toLowerCase()
+          const directAssignment = requestingUser.assignedProjects.find((assignment) => {
+            const assignmentName = assignment.project?.name ?? ""
+            return assignmentName.trim().toLowerCase() === normalizedName
+          })
+
+          if (directAssignment) {
+            resolvedProjectId = directAssignment.projectId
+          } else if (requestingUser.canViewAllProjects) {
+            const projectMatch = await db.project.findFirst({
+              where: { name: projectNameParam },
+              select: { id: true, name: true }
+            })
+
+            if (projectMatch) {
+              resolvedProjectId = projectMatch.id
+            } else {
+              const fallbackMatches = await db.$queryRaw<{ id: string }[]>`
+                SELECT "id" FROM "Project"
+                WHERE LOWER("name") = LOWER(${projectNameParam})
+                LIMIT 1
+              `
+
+              if (fallbackMatches.length > 0) {
+                resolvedProjectId = fallbackMatches[0].id
+              }
+            }
+          }
+
+          if (!resolvedProjectId) {
+            return NextResponse.json(
+              {
+                error: "Project not found for provided name",
+                requestedName: projectNameParam,
+                canViewAllProjects: requestingUser.canViewAllProjects,
+                assignedProjects
+              },
+              { status: 404 }
+            )
+          }
+        }
+
+        if (!resolvedProjectId) {
           return NextResponse.json(
             {
               success: true,
@@ -83,10 +132,12 @@ export async function GET(req: NextRequest) {
           )
         }
 
+        resolvedProjectId = resolvedProjectId.trim()
+
         if (
           !requestingUser.canViewAllProjects &&
           !requestingUser.assignedProjects.some(
-            (assignment) => assignment.projectId === projectIdParam
+            (assignment) => assignment.projectId === resolvedProjectId
           )
         ) {
           return NextResponse.json(
@@ -233,7 +284,12 @@ export async function GET(req: NextRequest) {
       // PROJECT MANAGER QUERIES
       // ========================================
     } else if (auth.context.role === "PROJECT_MANAGER") {
-      const projectId = searchParams.get("projectId") || auth.context.projectId
+      const projectId = (
+        resolvedProjectId ??
+        searchParams.get("projectId") ??
+        auth.context.projectId ??
+        ""
+      ).trim()
 
       if (!projectId) {
         return NextResponse.json(
