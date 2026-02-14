@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import bcrypt from "bcryptjs"
-import { randomBytes } from "crypto"
 
 import { authOptions } from "@/lib/auth"
 import { db } from "@/lib/db"
@@ -150,8 +149,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const temporaryPassword = randomBytes(6).toString("base64url")
-    const passwordHash = await bcrypt.hash(temporaryPassword, 10)
+    const defaultPassword = "admin123"
+    const passwordHash = await bcrypt.hash(defaultPassword, 10)
 
     const created = await db.$transaction(async (tx) => {
       const user = await tx.user.create({
@@ -207,7 +206,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         user: created,
-        temporaryPassword
+        temporaryPassword: defaultPassword
       },
       { status: 201 }
     )

@@ -21,19 +21,42 @@ export async function GET(req: NextRequest) {
     const queryType = searchParams.get("type") || "DEFAULT"
     const senderPhone = searchParams.get("senderPhone")
 
+    let requestingUser: null | {
+      id: string
+      role: string
+      canViewAllProjects: boolean
+      assignedProjects: {
+        projectId: string
+        project: { id: string; name: string } | null
+      }[]
+    } = null
+
     if (senderPhone && auth.context.role !== "RESIDENT") {
       const phoneVariants = buildPhoneVariants(senderPhone)
-      const user = await db.user.findFirst({
+      requestingUser = await db.user.findFirst({
         where: {
           role: auth.context.role,
           whatsappPhone: { in: phoneVariants }
         },
-        include: {
-          assignedProjects: true
+        select: {
+          id: true,
+          role: true,
+          canViewAllProjects: true,
+          assignedProjects: {
+            select: {
+              projectId: true,
+              project: {
+                select: {
+                  id: true,
+                  name: true
+                }
+              }
+            }
+          }
         }
       })
 
-      if (!user) {
+      if (!requestingUser) {
         return NextResponse.json(
           { error: "Unauthorized sender phone" },
           { status: 403 }
@@ -43,17 +66,29 @@ export async function GET(req: NextRequest) {
       if (auth.context.role === "PROJECT_MANAGER") {
         const projectIdParam = searchParams.get("projectId") || auth.context.projectId
         if (!projectIdParam) {
+          const assignedProjects = requestingUser.assignedProjects.map((assignment) => ({
+            id: assignment.project?.id ?? assignment.projectId,
+            name: assignment.project?.name ?? assignment.projectId
+          }))
+
           return NextResponse.json(
-            { error: "Project ID is required for PROJECT_MANAGER" },
-            { status: 400 }
+            {
+              success: true,
+              role: "PROJECT_MANAGER",
+              requiresProjectId: !requestingUser.canViewAllProjects,
+              canViewAllProjects: requestingUser.canViewAllProjects,
+              assignedProjects
+            },
+            { status: 200 }
           )
         }
 
-        const assigned = user.assignedProjects.some(
-          (assignment) => assignment.projectId === projectIdParam
-        )
-
-        if (!assigned) {
+        if (
+          !requestingUser.canViewAllProjects &&
+          !requestingUser.assignedProjects.some(
+            (assignment) => assignment.projectId === projectIdParam
+          )
+        ) {
           return NextResponse.json(
             { error: "Project Manager is not assigned to this project" },
             { status: 403 }
