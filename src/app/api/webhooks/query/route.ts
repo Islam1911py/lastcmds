@@ -3,6 +3,35 @@ import { db } from "@/lib/db"
 import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { buildPhoneVariants } from "@/lib/phone"
 
+type WebhookResponse<Data = unknown> = {
+  success: true
+  role: string
+  type: string
+  projectId?: string | null
+  meta?: Record<string, unknown>
+  data: Data
+  message?: string
+}
+
+function buildWebhookResponse<Data>(options: {
+  role: string
+  type: string
+  projectId?: string | null
+  data: Data
+  meta?: Record<string, unknown>
+  message?: string
+}): WebhookResponse<Data> {
+  return {
+    success: true,
+    role: options.role,
+    type: options.type,
+    projectId: options.projectId ?? null,
+    meta: options.meta,
+    data: options.data,
+    message: options.message
+  }
+}
+
 // GET /api/webhooks/query - للاستعلامات بناء على الـ role
 export async function GET(req: NextRequest) {
   const ipAddress = req.headers.get("x-forwarded-for") || "unknown"
@@ -148,7 +177,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    let data: any = {}
+    let responsePayload: WebhookResponse | null = null
 
     // ========================================
     // ACCOUNTANT QUERIES
@@ -183,37 +212,40 @@ export async function GET(req: NextRequest) {
           0
         )
 
-        data = {
+        responsePayload = buildWebhookResponse({
           role: "ACCOUNTANT",
-          statistics: {
-            totalInvoices,
-            totalPaid: Math.round(totalPaid * 100) / 100,
-            totalRemaining: Math.round(totalRemaining * 100) / 100
-          },
-          invoices: invoices.map((inv) => ({
-            id: inv.id,
-            invoiceNumber: inv.invoiceNumber,
-            type: inv.type,
-            amount: inv.amount,
-            unit: inv.unit.code,
-            ownerAssociation: inv.ownerAssociation.name,
-            totalPaid: inv.payments.reduce((s, p) => s + p.amount, 0),
-            remainingBalance:
-              inv.amount -
-              inv.payments.reduce((s, p) => s + p.amount, 0),
-            paymentCount: inv.payments.length,
-            createdAt: inv.issuedAt
-          })),
-          pendingAccountingNotes: accountingNotes.map((note) => ({
-            id: note.id,
-            description: note.description,
-            amount: note.amount,
-            unit: note.unit.code,
-            project: note.project.name,
-            createdBy: note.createdByUser.name,
-            createdAt: note.createdAt
-          }))
-        }
+          type: queryType,
+          data: {
+            statistics: {
+              totalInvoices,
+              totalPaid: Math.round(totalPaid * 100) / 100,
+              totalRemaining: Math.round(totalRemaining * 100) / 100
+            },
+            invoices: invoices.map((inv) => ({
+              id: inv.id,
+              invoiceNumber: inv.invoiceNumber,
+              type: inv.type,
+              amount: inv.amount,
+              unit: inv.unit.code,
+              ownerAssociation: inv.ownerAssociation.name,
+              totalPaid: inv.payments.reduce((s, p) => s + p.amount, 0),
+              remainingBalance:
+                inv.amount -
+                inv.payments.reduce((s, p) => s + p.amount, 0),
+              paymentCount: inv.payments.length,
+              createdAt: inv.issuedAt
+            })),
+            pendingAccountingNotes: accountingNotes.map((note) => ({
+              id: note.id,
+              description: note.description,
+              amount: note.amount,
+              unit: note.unit.code,
+              project: note.project.name,
+              createdBy: note.createdByUser.name,
+              createdAt: note.createdAt
+            }))
+          }
+        })
       }
 
       // ========================================
@@ -241,43 +273,46 @@ export async function GET(req: NextRequest) {
           db.staff.findMany()
         ])
 
-        data = {
+        responsePayload = buildWebhookResponse({
           role: "ADMIN",
-          summary: {
-            totalProjects: projects.length,
-            totalUnits: operationalUnits.length,
-            totalResidents: residents.length,
-            totalTickets: tickets.length,
-            openTickets: tickets.filter((t) => t.status !== "DONE").length,
-            totalTechnicians: technicians.length,
-            totalStaff: staff.length
-          },
-          projects: projects.map((p) => ({
-            id: p.id,
-            name: p.name,
-            type: p.projectType?.name ?? null,
-            isActive: p.isActive
-          })),
-          units: operationalUnits.map((u) => ({
-            id: u.id,
-            code: u.code,
-            name: u.name,
-            projectId: u.projectId
-          })),
-          residents: residents.map((r) => ({
-            id: r.id,
-            name: r.name,
-            email: r.email,
-            phone: r.phone,
-            status: r.status
-          })),
-          technicians: technicians.map((t) => ({
-            id: t.id,
-            name: t.name,
-            phone: t.phone,
-            specialty: t.specialty?.name ?? null
-          }))
-        }
+          type: queryType,
+          data: {
+            summary: {
+              totalProjects: projects.length,
+              totalUnits: operationalUnits.length,
+              totalResidents: residents.length,
+              totalTickets: tickets.length,
+              openTickets: tickets.filter((t) => t.status !== "DONE").length,
+              totalTechnicians: technicians.length,
+              totalStaff: staff.length
+            },
+            projects: projects.map((p) => ({
+              id: p.id,
+              name: p.name,
+              type: p.projectType?.name ?? null,
+              isActive: p.isActive
+            })),
+            units: operationalUnits.map((u) => ({
+              id: u.id,
+              code: u.code,
+              name: u.name,
+              projectId: u.projectId
+            })),
+            residents: residents.map((r) => ({
+              id: r.id,
+              name: r.name,
+              email: r.email,
+              phone: r.phone,
+              status: r.status
+            })),
+            technicians: technicians.map((t) => ({
+              id: t.id,
+              name: t.name,
+              phone: t.phone,
+              specialty: t.specialty?.name ?? null
+            }))
+          }
+        })
       }
 
       // ========================================
@@ -296,6 +331,124 @@ export async function GET(req: NextRequest) {
           { error: "Project ID is required for PROJECT_MANAGER" },
           { status: 400 }
         )
+      }
+
+      if (queryType === "LAST_EXPENSE") {
+        const rangeParam = searchParams.get("range")?.toUpperCase() ?? null
+        const dateParam = searchParams.get("date")
+        const unitFilter = searchParams.get("unit")?.trim() ?? null
+
+        let startDate: Date | null = null
+        let endDate: Date | null = null
+
+        if (rangeParam === "TODAY") {
+          startDate = new Date()
+          startDate.setHours(0, 0, 0, 0)
+          endDate = new Date()
+          endDate.setHours(23, 59, 59, 999)
+        } else if (rangeParam === "WEEK") {
+          endDate = new Date()
+          endDate.setHours(23, 59, 59, 999)
+          startDate = new Date(endDate)
+          startDate.setDate(startDate.getDate() - 6)
+          startDate.setHours(0, 0, 0, 0)
+        } else if (rangeParam === "MONTH") {
+          endDate = new Date()
+          endDate.setHours(23, 59, 59, 999)
+          startDate = new Date(endDate.getFullYear(), endDate.getMonth(), 1)
+        } else if (dateParam) {
+          const parsedDate = new Date(dateParam)
+          if (!Number.isNaN(parsedDate.getTime())) {
+            startDate = new Date(parsedDate)
+            startDate.setHours(0, 0, 0, 0)
+            endDate = new Date(parsedDate)
+            endDate.setHours(23, 59, 59, 999)
+          }
+        }
+
+        const whereClause: any = { projectId }
+        if (startDate && endDate) {
+          whereClause.createdAt = {
+            gte: startDate,
+            lte: endDate
+          }
+        }
+        if (unitFilter) {
+          whereClause.unit = {
+            OR: [
+              { code: unitFilter },
+              { name: unitFilter }
+            ]
+          }
+        }
+
+        const notes = await db.accountingNote.findMany({
+          where: whereClause,
+          orderBy: { createdAt: "desc" },
+          include: {
+            unit: {
+              select: {
+                id: true,
+                code: true,
+                name: true
+              }
+            },
+            createdByUser: {
+              select: {
+                id: true,
+                name: true
+              }
+            }
+          },
+          take: rangeParam === "TODAY" || dateParam ? 10 : 50
+        })
+
+        const response = buildWebhookResponse({
+          role: "PROJECT_MANAGER",
+          type: queryType,
+          projectId,
+          meta: {
+            filters: {
+              range: rangeParam,
+              date: dateParam,
+              unit: unitFilter
+            },
+            count: notes.length
+          },
+          data: {
+            expenses: notes.map((note) => ({
+              noteId: note.id,
+              amount: note.amount,
+              description: note.description,
+              status: note.status,
+              createdAt: note.createdAt,
+              unit: note.unit,
+              createdBy: note.createdByUser
+            })),
+            totalAmount: notes.reduce((sum, note) => sum + note.amount, 0)
+          },
+          message: notes.length === 0 ? "لا توجد مصروفات مطابقة للمعايير المدخلة" : undefined
+        })
+
+        await logWebhookEvent(
+          auth.context.keyId,
+          "QUERY_EXECUTED",
+          "/api/webhooks/query",
+          "GET",
+          200,
+          {
+            type: queryType,
+            projectId,
+            range: rangeParam,
+            date: dateParam,
+            unit: unitFilter
+          },
+          response,
+          undefined,
+          ipAddress
+        )
+
+        return NextResponse.json(response)
       }
 
       if (queryType === "PROJECT_DATA" || queryType === "DEFAULT") {
@@ -322,56 +475,185 @@ export async function GET(req: NextRequest) {
             })
           ])
 
-        data = {
+        responsePayload = buildWebhookResponse({
           role: "PROJECT_MANAGER",
-          project: {
-            id: project?.id,
-            name: project?.name,
-            type: project?.projectType?.name ?? null
-          },
-          summary: {
-            totalUnits: units.length,
-            totalResidents: residents.length,
-            openTickets: tickets.filter((t) => t.status !== "DONE").length,
-            totalTickets: tickets.length,
-            totalTechnicians: technicians.length,
-            totalStaff: staff.length
-          },
-          units: units.map((u) => ({
-            id: u.id,
-            code: u.code,
-            name: u.name
-          })),
-          residents: residents.map((r) => ({
-            id: r.id,
-            name: r.name,
-            email: r.email,
-            phone: r.phone,
-            unit: r.unitId
-          })),
-          openTickets: tickets
-            .filter((t) => t.status !== "DONE")
-            .map((t) => ({
-              id: t.id,
-              title: t.title,
-              unit: t.unit.code,
-              resident: t.resident?.name ?? null,
-              status: t.status,
-              priority: t.priority
+          type: queryType,
+          projectId,
+          data: {
+            project: {
+              id: project?.id,
+              name: project?.name,
+              type: project?.projectType?.name ?? null
+            },
+            summary: {
+              totalUnits: units.length,
+              totalResidents: residents.length,
+              openTickets: tickets.filter((t) => t.status !== "DONE").length,
+              totalTickets: tickets.length,
+              totalTechnicians: technicians.length,
+              totalStaff: staff.length
+            },
+            units: units.map((u) => ({
+              id: u.id,
+              code: u.code,
+              name: u.name
             })),
-          technicians: technicians.map((t) => ({
-            id: t.id,
-            name: t.name,
-            phone: t.phone,
-            specialty: t.specialty?.name ?? null
-          })),
-          staff: staff.map((s) => ({
-            id: s.id,
-            name: s.name,
-            role: s.role,
-            phone: s.phone
-          }))
+            residents: residents.map((r) => ({
+              id: r.id,
+              name: r.name,
+              email: r.email,
+              phone: r.phone,
+              unit: r.unitId
+            })),
+            openTickets: tickets
+              .filter((t) => t.status !== "DONE")
+              .map((t) => ({
+                id: t.id,
+                title: t.title,
+                unit: t.unit.code,
+                resident: t.resident?.name ?? null,
+                status: t.status,
+                priority: t.priority
+              })),
+            technicians: technicians.map((t) => ({
+              id: t.id,
+              name: t.name,
+              phone: t.phone,
+              specialty: t.specialty?.name ?? null
+            })),
+            staff: staff.map((s) => ({
+              id: s.id,
+              name: s.name,
+              role: s.role,
+              phone: s.phone
+            }))
+          }
+        })
+      }
+
+      if (queryType === "TICKET_BY_RESIDENT") {
+        const residentInput = searchParams.get("resident")?.trim()
+
+        if (!residentInput) {
+          return NextResponse.json(
+            {
+              error: "Missing resident identifier",
+              hint: "Provide resident name or phone"
+            },
+            { status: 400 }
+          )
         }
+
+        const phoneVariants = buildPhoneVariants(residentInput)
+        const residentOr: any[] = [{ name: residentInput }]
+        if (phoneVariants.length > 0) {
+          residentOr.unshift({ phone: { in: phoneVariants } })
+        }
+
+        const residentMatch = await db.resident.findFirst({
+          where: {
+            unit: { projectId },
+            OR: residentOr
+          },
+          include: {
+            unit: {
+              select: {
+                id: true,
+                code: true,
+                name: true
+              }
+            }
+          }
+        })
+
+        if (!residentMatch) {
+          const response = buildWebhookResponse({
+            role: "PROJECT_MANAGER",
+            type: queryType,
+            projectId,
+            data: {
+              resident: null,
+              tickets: []
+            },
+            message: "لم يتم العثور على مقيم بهذه البيانات"
+          })
+
+          await logWebhookEvent(
+            auth.context.keyId,
+            "QUERY_EXECUTED",
+            "/api/webhooks/query",
+            "GET",
+            200,
+            { type: queryType, projectId, resident: residentInput },
+            response,
+            undefined,
+            ipAddress
+          )
+
+          return NextResponse.json(response)
+        }
+
+        const residentTickets = await db.ticket.findMany({
+          where: { residentId: residentMatch.id },
+          orderBy: { createdAt: "desc" },
+          take: 20,
+          include: {
+            unit: true,
+            assignedTo: {
+              select: {
+                id: true,
+                name: true
+              }
+            }
+          }
+        })
+
+        const response = buildWebhookResponse({
+          role: "PROJECT_MANAGER",
+          type: queryType,
+          projectId,
+          meta: {
+            residentId: residentMatch.id,
+            ticketCount: residentTickets.length
+          },
+          data: {
+            resident: {
+              id: residentMatch.id,
+              name: residentMatch.name,
+              phone: residentMatch.phone,
+              unit: residentMatch.unit
+            },
+            tickets: residentTickets.map((ticket) => ({
+              id: ticket.id,
+              title: ticket.title,
+              description: ticket.description,
+              status: ticket.status,
+              priority: ticket.priority,
+              createdAt: ticket.createdAt,
+              closedAt: ticket.closedAt,
+              unit: {
+                id: ticket.unit.id,
+                code: ticket.unit.code,
+                name: ticket.unit.name
+              },
+              assignedTo: ticket.assignedTo
+            }))
+          }
+        })
+
+        await logWebhookEvent(
+          auth.context.keyId,
+          "QUERY_EXECUTED",
+          "/api/webhooks/query",
+          "GET",
+          200,
+          { type: queryType, projectId, resident: residentInput },
+          response,
+          undefined,
+          ipAddress
+        )
+
+        return NextResponse.json(response)
       }
 
       if (queryType === "TODAY_TICKETS") {
@@ -391,24 +673,29 @@ export async function GET(req: NextRequest) {
           include: { resident: true, unit: true }
         })
 
-        data = {
+        responsePayload = buildWebhookResponse({
           role: "PROJECT_MANAGER",
+          type: queryType,
           projectId,
-          date: startOfDay.toISOString().substring(0, 10),
-          count: tickets.length,
-          tickets: tickets.map((t) => ({
-            id: t.id,
-            title: t.title,
-            description: t.description,
-            priority: t.priority,
-            status: t.status,
-            resident: t.resident?.name ?? null,
-            residentPhone: t.resident?.phone ?? null,
-            unit: t.unit.code,
-            unitName: t.unit.name,
-            createdAt: t.createdAt
-          }))
-        }
+          meta: {
+            date: startOfDay.toISOString().substring(0, 10),
+            count: tickets.length
+          },
+          data: {
+            tickets: tickets.map((t) => ({
+              id: t.id,
+              title: t.title,
+              description: t.description,
+              priority: t.priority,
+              status: t.status,
+              resident: t.resident?.name ?? null,
+              residentPhone: t.resident?.phone ?? null,
+              unit: t.unit.code,
+              unitName: t.unit.name,
+              createdAt: t.createdAt
+            }))
+          }
+        })
       }
 
       // ========================================
@@ -418,17 +705,28 @@ export async function GET(req: NextRequest) {
       // Residents can only query their own tickets
       if (queryType === "MY_TICKETS" || queryType === "DEFAULT") {
         // Get resident from email/phone (would need to implement this properly)
-        data = {
+        responsePayload = buildWebhookResponse({
           role: "RESIDENT",
+          type: queryType,
+          data: {},
           message:
             "Residents cannot query via webhooks. Please use the dashboard."
-        }
+        })
       }
     }
 
-    const response = {
-      success: true,
-      ...data
+    const response =
+      responsePayload ??
+      buildWebhookResponse({
+        role: auth.context.role,
+        type: queryType,
+        data: {},
+        message: "No data available for this query"
+      })
+
+    const auditContext: Record<string, unknown> = { type: queryType }
+    if (response.projectId) {
+      auditContext.projectId = response.projectId
     }
 
     await logWebhookEvent(
@@ -437,7 +735,7 @@ export async function GET(req: NextRequest) {
       "/api/webhooks/query",
       "GET",
       200,
-      { type: queryType },
+      auditContext,
       response,
       undefined,
       ipAddress

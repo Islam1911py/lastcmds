@@ -46,9 +46,24 @@ type RequestBody = {
 
 type ManagerRecord = NonNullable<Awaited<ReturnType<typeof resolveProjectManager>>>
 
+type ActionSuccessPayload<Data = unknown> = {
+  success: true
+  projectId?: string | null
+  data: Data
+  meta?: Record<string, unknown>
+  message?: string
+}
+
+type ActionErrorPayload = {
+  success: false
+  error: string
+  issues?: Record<string, unknown>
+  projectId?: string | null
+}
+
 type HandlerResponse = {
   status: number
-  body: Record<string, unknown>
+  body: ActionSuccessPayload | ActionErrorPayload
 }
 
 type ActionHandler<K extends AllowedAction> = (
@@ -140,14 +155,22 @@ async function handleCreateOperationalExpense(
   if (!projectId || !unitCode || !normalizedDescription || Number.isNaN(numericAmount) || numericAmount <= 0) {
     return {
       status: 400,
-      body: { error: "Missing or invalid fields for operational expense" }
+      body: {
+        success: false,
+        error: "Missing or invalid fields for operational expense",
+        projectId: projectId || null
+      }
     }
   }
 
   if (sourceType !== "OFFICE_FUND" && sourceType !== "PM_ADVANCE") {
     return {
       status: 400,
-      body: { error: "Invalid sourceType. Use OFFICE_FUND or PM_ADVANCE" }
+      body: {
+        success: false,
+        error: "Invalid sourceType. Use OFFICE_FUND or PM_ADVANCE",
+        projectId
+      }
     }
   }
 
@@ -156,14 +179,22 @@ async function handleCreateOperationalExpense(
   if (!project) {
     return {
       status: 404,
-      body: { error: "Project not found" }
+      body: {
+        success: false,
+        error: "Project not found",
+        projectId
+      }
     }
   }
 
   if (!assertProjectAccess(manager, projectId)) {
     return {
       status: 403,
-      body: { error: "Project manager is not assigned to this project" }
+      body: {
+        success: false,
+        error: "Project manager is not assigned to this project",
+        projectId
+      }
     }
   }
 
@@ -177,7 +208,12 @@ async function handleCreateOperationalExpense(
   if (!unit) {
     return {
       status: 404,
-      body: { error: "Operational unit not found for provided code" }
+      body: {
+        success: false,
+        error: "Operational unit not found for provided code",
+        projectId,
+        issues: { unitCode }
+      }
     }
   }
 
@@ -188,7 +224,12 @@ async function handleCreateOperationalExpense(
     if (!pmAdvanceId) {
       return {
         status: 400,
-        body: { error: "pmAdvanceId is required for PM_ADVANCE source" }
+        body: {
+          success: false,
+          error: "pmAdvanceId is required for PM_ADVANCE source",
+          projectId,
+          issues: { sourceType }
+        }
       }
     }
 
@@ -199,21 +240,39 @@ async function handleCreateOperationalExpense(
     if (!pmAdvance) {
       return {
         status: 404,
-        body: { error: "PM advance not found" }
+        body: {
+          success: false,
+          error: "PM advance not found",
+          projectId,
+          issues: { pmAdvanceId }
+        }
       }
     }
 
     if (pmAdvance.projectId && pmAdvance.projectId !== projectId) {
       return {
         status: 403,
-        body: { error: "PM advance does not belong to the provided project" }
+        body: {
+          success: false,
+          error: "PM advance does not belong to the provided project",
+          projectId,
+          issues: { pmAdvanceProjectId: pmAdvance.projectId }
+        }
       }
     }
 
     if (pmAdvance.remainingAmount < numericAmount) {
       return {
         status: 400,
-        body: { error: "Insufficient PM advance remaining balance" }
+        body: {
+          success: false,
+          error: "Insufficient PM advance remaining balance",
+          projectId,
+          issues: {
+            remaining: pmAdvance.remainingAmount,
+            requested: numericAmount
+          }
+        }
       }
     }
 
@@ -228,7 +287,12 @@ async function handleCreateOperationalExpense(
     if (Number.isNaN(parsed.getTime())) {
       return {
         status: 400,
-        body: { error: "Invalid recordedAt value" }
+        body: {
+          success: false,
+          error: "Invalid recordedAt value",
+          projectId,
+          issues: { recordedAt }
+        }
       }
     }
     recordedAtDate = parsed
@@ -276,16 +340,23 @@ async function handleCreateOperationalExpense(
     status: 201,
     body: {
       success: true,
+      projectId,
       message: "Operational expense recorded",
-      expense: {
-        id: expense.id,
-        description: expense.description,
-        amount: expense.amount,
-        sourceType: expense.sourceType,
-        unit: expense.unit,
-        recordedAt: expense.recordedAt,
-        recordedByUserId: expense.recordedByUserId,
+      meta: {
+        unitCode,
+        sourceType,
         pmAdvanceRemaining
+      },
+      data: {
+        expense: {
+          id: expense.id,
+          description: expense.description,
+          amount: expense.amount,
+          sourceType: expense.sourceType,
+          unit: expense.unit,
+          recordedAt: expense.recordedAt,
+          recordedByUserId: expense.recordedByUserId
+        }
       }
     }
   }
@@ -300,14 +371,22 @@ async function handleResidentLookup(
   if (!projectId || !unitCode) {
     return {
       status: 400,
-      body: { error: "projectId and unitCode are required" }
+      body: {
+        success: false,
+        error: "projectId and unitCode are required",
+        projectId: projectId || null
+      }
     }
   }
 
   if (!assertProjectAccess(manager, projectId)) {
     return {
       status: 403,
-      body: { error: "Project manager is not assigned to this project" }
+      body: {
+        success: false,
+        error: "Project manager is not assigned to this project",
+        projectId
+      }
     }
   }
 
@@ -321,7 +400,12 @@ async function handleResidentLookup(
   if (!unit) {
     return {
       status: 404,
-      body: { error: "Operational unit not found" }
+      body: {
+        success: false,
+        error: "Operational unit not found",
+        projectId,
+        issues: { unitCode }
+      }
     }
   }
 
@@ -352,8 +436,15 @@ async function handleResidentLookup(
     status: 200,
     body: {
       success: true,
-      residents,
-      count: residents.length
+      projectId,
+      meta: {
+        unitCode,
+        count: residents.length
+      },
+      data: {
+        residents
+      },
+      message: residents.length === 0 ? "لا توجد بيانات سكان للوحدة" : undefined
     }
   }
 }
@@ -367,14 +458,22 @@ async function handleTicketSummary(
   if (!projectId) {
     return {
       status: 400,
-      body: { error: "projectId is required" }
+      body: {
+        success: false,
+        error: "projectId is required",
+        projectId: null
+      }
     }
   }
 
   if (!assertProjectAccess(manager, projectId)) {
     return {
       status: 403,
-      body: { error: "Project manager is not assigned to this project" }
+      body: {
+        success: false,
+        error: "Project manager is not assigned to this project",
+        projectId
+      }
     }
   }
 
@@ -417,8 +516,16 @@ async function handleTicketSummary(
     status: 200,
     body: {
       success: true,
-      tickets,
-      count: tickets.length
+      projectId,
+      meta: {
+        unitCode: unitCode ?? null,
+        statuses: validStatuses,
+        count: tickets.length
+      },
+      data: {
+        tickets
+      },
+      message: tickets.length === 0 ? "لا توجد تذاكر بالمحددات الحالية" : undefined
     }
   }
 }
@@ -512,14 +619,39 @@ export async function POST(req: NextRequest) {
     console.error("Project manager webhook error:", error)
     response = {
       status: 500,
-      body: { error: "Internal server error" }
+      body: { success: false, error: "Internal server error" }
     }
   }
 
-  const enrichedBody = {
-    ...response.body,
-    manager: managerContext
-  }
+  const projectIdFromPayload =
+    (actionPayload as { projectId?: string | null })?.projectId ??
+    (response.body as ActionSuccessPayload | ActionErrorPayload).projectId ??
+    null
+
+  const enrichedBody = response.body.success
+    ? {
+        success: true,
+        action,
+        manager: managerContext,
+        projectId: projectIdFromPayload,
+        meta: {
+          managerName: manager.name,
+          ...(response.body as ActionSuccessPayload).meta
+        },
+        data: (response.body as ActionSuccessPayload).data,
+        message: (response.body as ActionSuccessPayload).message
+      }
+    : {
+        success: false,
+        action,
+        manager: managerContext,
+        projectId: projectIdFromPayload,
+        error: (response.body as ActionErrorPayload).error,
+        issues: (response.body as ActionErrorPayload).issues,
+        meta: {
+          managerName: manager.name
+        }
+      }
 
   await logWebhookEvent(
     auth.context.keyId,
