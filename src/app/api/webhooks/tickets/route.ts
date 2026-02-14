@@ -4,6 +4,38 @@ import { db } from "@/lib/db"
 import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { notifyN8nEvent } from "@/lib/n8n-notify"
 
+type HumanReadable = {
+  en?: string
+  ar?: string
+}
+
+type Suggestion = {
+  title: string
+  prompt: string
+  data?: Record<string, unknown>
+}
+
+type UnitWithProject = Prisma.OperationalUnitGetPayload<{
+  include: { project: true }
+}>
+
+function formatDate(date: Date | string) {
+  const parsed = typeof date === "string" ? new Date(date) : date
+  if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) {
+    return null
+  }
+
+  try {
+    return parsed.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric"
+    })
+  } catch {
+    return parsed.toISOString().split("T")[0] ?? null
+  }
+}
+
 export async function POST(req: NextRequest) {
   const ipAddress = req.headers.get("x-forwarded-for") || "unknown"
 
@@ -14,7 +46,20 @@ export async function POST(req: NextRequest) {
     const auth = await verifyN8nApiKey(req)
     if (!auth.valid || !auth.context) {
       return NextResponse.json(
-        { error: auth.error || "Unauthorized" },
+        {
+          success: false,
+          error: auth.error || "Unauthorized",
+          humanReadable: {
+            en: "API key failed verification, ticket webhook rejected.",
+            ar: "مفتاح الـ API غير صالح، تم رفض تشغيل الويب هوك."
+          },
+          suggestions: [
+            {
+              title: "مراجعة بيانات API",
+              prompt: "تأكد من استخدام مفتاح n8n الصحيح وتأكد أنه مفعّل في النظام."
+            }
+          ]
+        },
         { status: 401 }
       )
     }
@@ -34,7 +79,20 @@ export async function POST(req: NextRequest) {
       )
 
       return NextResponse.json(
-        { error: "Only residents can create tickets" },
+        {
+          success: false,
+          error: "Only residents can create tickets",
+          humanReadable: {
+            en: "This webhook accepts resident credentials only.",
+            ar: "هذا الويب هوك يقبل مفاتيح السكان فقط."
+          },
+          suggestions: [
+            {
+              title: "استخدم مفتاح الساكن",
+              prompt: "أرسل الطلب بنفس مفتاح التكامل الخاص بالساكن الذي أنشأ التذكرة."
+            }
+          ]
+        },
         { status: 403 }
       )
     }
@@ -82,7 +140,18 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json(
         {
-          error: "Missing required fields: residentName, title, description"
+          success: false,
+          error: "Missing required fields: residentName, title, description",
+          humanReadable: {
+            en: "Need resident name, ticket title, and description to log a request.",
+            ar: "يجب إدخال اسم الساكن، العنوان، والوصف لتسجيل التذكرة."
+          },
+          suggestions: [
+            {
+              title: "إعادة إرسال البيانات",
+              prompt: "أعد إرسال الطلب متضمناً اسم الساكن، عنوان واضح، ووصف للمشكلة."
+            }
+          ]
         },
         { status: 400 }
       )
@@ -103,7 +172,18 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json(
         {
-          error: "Missing unit details. Please provide building number or unit name."
+          success: false,
+          error: "Missing unit details. Please provide building number or unit name.",
+          humanReadable: {
+            en: "Please include a unit code, building number, or unit name so we can route the ticket.",
+            ar: "من فضلك أرسل كود الوحدة أو رقم المبنى أو اسم الوحدة لربط التذكرة بشكل صحيح."
+          },
+          suggestions: [
+            {
+              title: "تحديد الوحدة",
+              prompt: "اذكر كود الوحدة أو اسمها كما هو مسجل في النظام."
+            }
+          ]
         },
         { status: 400 }
       )
@@ -130,8 +210,19 @@ export async function POST(req: NextRequest) {
       if (!project) {
         return NextResponse.json(
           {
+            success: false,
             error: "Project not found",
-            requestedName: trimmedProjectName
+            requestedName: trimmedProjectName,
+            humanReadable: {
+              en: `No project matches "${trimmedProjectName}".` ,
+              ar: `لا يوجد مشروع مطابق للاسم "${trimmedProjectName}".`
+            },
+            suggestions: [
+              {
+                title: "تأكيد اسم المشروع",
+                prompt: "راجع اسم المشروع في لوحة الإدارة ثم أعد المحاولة."
+              }
+            ]
           },
           { status: 404 }
         )
@@ -139,7 +230,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Resolve unit by code/name within optional project scope
-    let unit: Awaited<ReturnType<typeof db.operationalUnit.findFirst>> | null = null
+    let unit: UnitWithProject | null = null
 
     if (requestedUnitCode) {
       unit = await db.operationalUnit.findFirst({
@@ -212,12 +303,26 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json(
         {
+          success: false,
           error: "Unable to find the specified unit",
           details: {
             project: trimmedProjectName || null,
             unitCode: requestedUnitCode || null,
             unitName: trimmedUnitName || null
-          }
+          },
+          humanReadable: {
+            en: "Could not match the provided unit information to an existing unit.",
+            ar: "تعذر العثور على وحدة مطابقة للبيانات المرسلة."
+          },
+          suggestions: [
+            {
+              title: "قائمة أكواد الوحدات",
+              prompt: "اذكر لي أكواد أو أسماء الوحدات المتاحة في هذا المشروع للتأكد من الكود الصحيح.",
+              data: {
+                projectName: trimmedProjectName || null
+              }
+            }
+          ]
         },
         { status: 404 }
       )
@@ -300,10 +405,61 @@ export async function POST(req: NextRequest) {
       }
     })
 
+    const ticketNumber = `TICK-${ticket.id.substring(0, 8).toUpperCase()}`
+    const projectLabel = project?.name ?? unit.project?.name ?? resident!.unit.project?.name ?? null
+    const unitLabel = unit.name ? `${unit.code} • ${unit.name}` : unit.code
+    const createdAtLabel = formatDate(ticket.createdAt)
+    const priorityLabel = (priority || "Normal").toString()
+
+    const humanReadable: HumanReadable = {
+      en: `New ticket ${ticketNumber} opened by ${resident!.name} for unit ${unitLabel}${projectLabel ? ` in project ${projectLabel}` : ""}. Priority: ${priorityLabel}${createdAtLabel ? ` on ${createdAtLabel}` : ""}.`,
+      ar: `تم فتح تذكرة جديدة ${ticketNumber} بواسطة ${resident!.name} للوحدة ${unitLabel}${projectLabel ? ` في مشروع ${projectLabel}` : ""}. الأولوية: ${priorityLabel}${createdAtLabel ? ` بتاريخ ${createdAtLabel}` : ""}.`
+    }
+
+    const suggestions: Suggestion[] = [
+      {
+        title: "تعيين فني",
+        prompt: `كلف فني مناسب للتذكرة ${ticketNumber} وحدد موعد الزيارة.` ,
+        data: {
+          ticketId: ticket.id,
+          unitId: unit.id
+        }
+      },
+      {
+        title: "إبلاغ الساكن",
+        prompt: `أرسل تأكيد للساكن ${resident!.name} بأن التذكرة ${ticketNumber} تحت المتابعة.` ,
+        data: {
+          residentId: resident!.id,
+          ticketNumber
+        }
+      }
+    ]
+
+    const meta = {
+      event: "TICKET_CREATED" as const,
+      projectId: unit.project?.id ?? project?.id ?? resident!.unit.project?.id ?? null,
+      projectName: projectLabel,
+      unitId: unit.id,
+      unitCode: unit.code,
+      priority: priorityLabel,
+      createdAt: ticket.createdAt,
+      residentId: resident!.id
+    }
+
     const response = {
       success: true,
       ticketId: ticket.id,
-      ticketNumber: `TICK-${ticket.id.substring(0, 8).toUpperCase()}`,
+      ticketNumber,
+      ticket: {
+        id: ticket.id,
+        title: trimmedTitle,
+        description: trimmedDescription,
+        priority: priorityLabel,
+        status: "NEW",
+        residentId: resident!.id,
+        unitId: unit.id,
+        createdAt: ticket.createdAt
+      },
       resident: {
         id: resident!.id,
         name: resident!.name,
@@ -311,29 +467,27 @@ export async function POST(req: NextRequest) {
         phone: resident!.phone,
         unitCode: resident!.unit.code
       },
-      message: "Ticket created successfully"
-    }
-
-    await notifyN8nEvent("TICKET_CREATED", {
-      ticket: {
-        id: ticket.id,
-        title: trimmedTitle,
-        description: trimmedDescription,
-        priority: priority || "Normal",
-        status: "NEW"
-      },
       unit: {
         id: unit.id,
         code: unit.code,
         name: unit.name,
-        project: project?.name ?? null
+        projectId: unit.project?.id ?? project?.id ?? null,
+        projectName: projectLabel
       },
-      resident: {
-        id: resident!.id,
-        name: resident!.name,
-        email: resident!.email,
-        phone: resident!.phone
-      }
+      meta,
+      humanReadable,
+      suggestions,
+      message: "Ticket created successfully"
+    }
+
+    await notifyN8nEvent("TICKET_CREATED", {
+      ticket: response.ticket,
+      ticketNumber,
+      resident: response.resident,
+      unit: response.unit,
+      meta,
+      humanReadable,
+      suggestions
     })
 
     await logWebhookEvent(
@@ -368,7 +522,20 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json(
-      { error: "Failed to create ticket" },
+      {
+        success: false,
+        error: "Failed to create ticket",
+        humanReadable: {
+          en: "Ticket creation failed due to an internal error.",
+          ar: "فشل إنشاء التذكرة بسبب خطأ داخلي."
+        },
+        suggestions: [
+          {
+            title: "إعادة المحاولة لاحقاً",
+            prompt: "حاول إعادة إرسال نفس الطلب بعد قليل أو تواصل مع فريق الدعم إذا استمرت المشكلة."
+          }
+        ]
+      },
       { status: 500 }
     )
   }

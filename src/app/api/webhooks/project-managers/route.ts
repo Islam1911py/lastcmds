@@ -46,12 +46,25 @@ type RequestBody = {
 
 type ManagerRecord = NonNullable<Awaited<ReturnType<typeof resolveProjectManager>>>
 
+type HumanReadable = {
+  en?: string
+  ar?: string
+}
+
+type Suggestion = {
+  title: string
+  prompt: string
+  data?: Record<string, unknown>
+}
+
 type ActionSuccessPayload<Data = unknown> = {
   success: true
   projectId?: string | null
   data: Data
   meta?: Record<string, unknown>
   message?: string
+  humanReadable?: HumanReadable
+  suggestions?: Suggestion[]
 }
 
 type ActionErrorPayload = {
@@ -59,6 +72,9 @@ type ActionErrorPayload = {
   error: string
   issues?: Record<string, unknown>
   projectId?: string | null
+  meta?: Record<string, unknown>
+  humanReadable?: HumanReadable
+  suggestions?: Suggestion[]
 }
 
 type HandlerResponse = {
@@ -97,6 +113,33 @@ function parseLimit(input: unknown, fallback = 5, max = 25) {
     return fallback
   }
   return Math.min(Math.trunc(numeric), max)
+}
+
+function formatCurrency(amount: number) {
+  try {
+    return amount.toLocaleString("en-US", {
+      minimumFractionDigits: amount % 1 === 0 ? 0 : 2,
+      maximumFractionDigits: 2
+    })
+  } catch {
+    return String(amount)
+  }
+}
+
+function formatDate(date: Date | null | undefined) {
+  if (!date) {
+    return null
+  }
+
+  try {
+    return date.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric"
+    })
+  } catch {
+    return date.toISOString().split("T")[0] ?? null
+  }
 }
 
 async function resolveProjectManager(senderPhone: string) {
@@ -158,7 +201,20 @@ async function handleCreateOperationalExpense(
       body: {
         success: false,
         error: "Missing or invalid fields for operational expense",
-        projectId: projectId || null
+        projectId: projectId || null,
+        humanReadable: {
+          en: "I could not record the expense because some fields are missing or invalid.",
+          ar: "لم أستطع تسجيل المصروف لأن بعض البيانات ناقصة أو غير صحيحة."
+        },
+        suggestions: [
+          {
+            title: "إرسال بيانات المصروف كاملة",
+            prompt: "من فضلك أعد إرسال رقم المشروع، كود الوحدة، وصف واضح، قيمة موجبة، وحدد المصدر OFFICE_FUND أو PM_ADVANCE.",
+            data: {
+              requiredFields: ["projectId", "unitCode", "description", "amount", "sourceType"]
+            }
+          }
+        ]
       }
     }
   }
@@ -169,7 +225,20 @@ async function handleCreateOperationalExpense(
       body: {
         success: false,
         error: "Invalid sourceType. Use OFFICE_FUND or PM_ADVANCE",
-        projectId
+        projectId,
+        humanReadable: {
+          en: "The expense source must be OFFICE_FUND or PM_ADVANCE.",
+          ar: "المصدر يجب أن يكون OFFICE_FUND أو PM_ADVANCE."
+        },
+        suggestions: [
+          {
+            title: "ضبط نوع المصدر",
+            prompt: "استخدم OFFICE_FUND للمصروفات من الخزنة أو PM_ADVANCE للمقدم الخاص بالمدير.",
+            data: {
+              acceptedValues: ["OFFICE_FUND", "PM_ADVANCE"]
+            }
+          }
+        ]
       }
     }
   }
@@ -182,7 +251,20 @@ async function handleCreateOperationalExpense(
       body: {
         success: false,
         error: "Project not found",
-        projectId
+        projectId,
+        humanReadable: {
+          en: "I could not find this project, so the expense was not recorded.",
+          ar: "لم أجد هذا المشروع لذلك لم يتم تسجيل المصروف."
+        },
+        suggestions: [
+          {
+            title: "تأكيد رقم المشروع",
+            prompt: "تأكد من رقم المشروع ثم أعد طلب تسجيل المصروف.",
+            data: {
+              attemptedProjectId: projectId
+            }
+          }
+        ]
       }
     }
   }
@@ -193,7 +275,21 @@ async function handleCreateOperationalExpense(
       body: {
         success: false,
         error: "Project manager is not assigned to this project",
-        projectId
+        projectId,
+        humanReadable: {
+          en: "You are not assigned to this project, so I stopped the expense.",
+          ar: "أنت غير مكلّف بهذا المشروع لذلك أوقفت تسجيل المصروف."
+        },
+        suggestions: [
+          {
+            title: "طلب صلاحية المشروع",
+            prompt: "من فضلك اطلب إضافة المشروع إلى صلاحياتي ثم أعد تسجيل المصروف.",
+            data: {
+              managerId: manager.id,
+              projectId
+            }
+          }
+        ]
       }
     }
   }
@@ -212,7 +308,20 @@ async function handleCreateOperationalExpense(
         success: false,
         error: "Operational unit not found for provided code",
         projectId,
-        issues: { unitCode }
+        issues: { unitCode },
+        humanReadable: {
+          en: "I could not find an operational unit with that code inside the project.",
+          ar: "لم أجد وحدة تشغيلية بهذا الكود داخل المشروع."
+        },
+        suggestions: [
+          {
+            title: "قائمة الأكواد المتاحة",
+            prompt: "اذكر لي أكواد الوحدات المتاحة في هذا المشروع.",
+            data: {
+              projectId
+            }
+          }
+        ]
       }
     }
   }
@@ -228,7 +337,21 @@ async function handleCreateOperationalExpense(
           success: false,
           error: "pmAdvanceId is required for PM_ADVANCE source",
           projectId,
-          issues: { sourceType }
+          issues: { sourceType },
+          humanReadable: {
+            en: "Please specify which PM advance should fund this expense.",
+            ar: "من فضلك حدد أي مقدم خاص بالمدير سيموّل هذا المصروف."
+          },
+          suggestions: [
+            {
+              title: "استعراض مقدمات المدير",
+              prompt: "اعرض لي المقدمات المتاحة للمدير لهذا المشروع.",
+              data: {
+                projectId,
+                managerId: manager.id
+              }
+            }
+          ]
         }
       }
     }
@@ -244,7 +367,20 @@ async function handleCreateOperationalExpense(
           success: false,
           error: "PM advance not found",
           projectId,
-          issues: { pmAdvanceId }
+          issues: { pmAdvanceId },
+          humanReadable: {
+            en: "I could not find the referenced PM advance entry.",
+            ar: "تعذر العثور على المقدم المحدد."
+          },
+          suggestions: [
+            {
+              title: "اختيار مقدم صحيح",
+              prompt: "من فضلك استخدم معرف مقدم صحيح مرتبط بالمشروع الحالي.",
+              data: {
+                attemptedPmAdvanceId: pmAdvanceId
+              }
+            }
+          ]
         }
       }
     }
@@ -256,7 +392,21 @@ async function handleCreateOperationalExpense(
           success: false,
           error: "PM advance does not belong to the provided project",
           projectId,
-          issues: { pmAdvanceProjectId: pmAdvance.projectId }
+          issues: { pmAdvanceProjectId: pmAdvance.projectId },
+          humanReadable: {
+            en: "That PM advance is linked to another project.",
+            ar: "هذا المقدم مرتبط بمشروع آخر."
+          },
+          suggestions: [
+            {
+              title: "تحديد مشروع المقدم",
+              prompt: "اذكر لي المقدمات المرتبطة بالمشروع المطلوب.",
+              data: {
+                projectId,
+                pmAdvanceProjectId: pmAdvance.projectId
+              }
+            }
+          ]
         }
       }
     }
@@ -271,7 +421,21 @@ async function handleCreateOperationalExpense(
           issues: {
             remaining: pmAdvance.remainingAmount,
             requested: numericAmount
-          }
+          },
+          humanReadable: {
+            en: `The PM advance has ${formatCurrency(pmAdvance.remainingAmount)} remaining, which is less than the requested amount ${formatCurrency(numericAmount)}.`,
+            ar: `المتبقي في المقدم ${formatCurrency(pmAdvance.remainingAmount)} وهو أقل من المطلوب ${formatCurrency(numericAmount)}.`
+          },
+          suggestions: [
+            {
+              title: "إبلاغ المدير بالمتبقي",
+              prompt: `أخبر المدير أن المتبقي في المقدم هو ${formatCurrency(pmAdvance.remainingAmount)} فقط.`,
+              data: {
+                remaining: pmAdvance.remainingAmount,
+                requested: numericAmount
+              }
+            }
+          ]
         }
       }
     }
@@ -291,7 +455,20 @@ async function handleCreateOperationalExpense(
           success: false,
           error: "Invalid recordedAt value",
           projectId,
-          issues: { recordedAt }
+          issues: { recordedAt },
+          humanReadable: {
+            en: "The recorded date is invalid. Please use an ISO format like 2024-05-01.",
+            ar: "تاريخ التسجيل غير صالح. استخدم صيغة مثل 2024-05-01."
+          },
+          suggestions: [
+            {
+              title: "تصحيح التاريخ",
+              prompt: "استخدم تاريخ بصيغة YYYY-MM-DD عند تسجيل المصروف.",
+              data: {
+                attemptedRecordedAt: recordedAt
+              }
+            }
+          ]
         }
       }
     }
@@ -336,6 +513,42 @@ async function handleCreateOperationalExpense(
     })
   }
 
+  const amountLabel = formatCurrency(expense.amount)
+  const unitDisplay = expense.unit.name
+    ? `${expense.unit.code} • ${expense.unit.name}`
+    : expense.unit.code
+  const projectName = expense.unit.project?.name ?? null
+  const sourceLabelEn = sourceType === "PM_ADVANCE" ? "PM advance" : "office fund"
+  const sourceLabelAr = sourceType === "PM_ADVANCE" ? "مقدم المدير" : "خزنة المكتب"
+  const recordedDateLabel = formatDate(expense.recordedAt)
+  const remainingLabel = typeof pmAdvanceRemaining === "number" ? formatCurrency(pmAdvanceRemaining) : null
+
+  const humanReadable: HumanReadable = {
+    en: `Recorded an operational expense of ${amountLabel} for unit ${unitDisplay}${projectName ? ` in project ${projectName}` : ""} from the ${sourceLabelEn}${recordedDateLabel ? ` dated ${recordedDateLabel}` : ""}${remainingLabel ? `. Remaining advance: ${remainingLabel}` : ""}.`,
+    ar: `تم تسجيل مصروف تشغيلي بقيمة ${amountLabel} للوحدة ${unitDisplay}${projectName ? ` ضمن مشروع ${projectName}` : ""} من ${sourceLabelAr}${recordedDateLabel ? ` بتاريخ ${recordedDateLabel}` : ""}${remainingLabel ? `، والمتبقي من المقدم ${remainingLabel}` : ""}.`
+  }
+
+  const suggestions: Suggestion[] = [
+    {
+      title: "عرض آخر المصروفات",
+      prompt: `هات أحدث 5 مصروفات تشغيل للوحدة ${unitCode}.`,
+      data: {
+        projectId,
+        unitCode
+      }
+    },
+    pmAdvanceRemaining === undefined
+      ? undefined
+      : {
+          title: "متابعة رصيد المقدم",
+          prompt: "ذكرني بالرصيد المتبقي من مقدم المدير لهذا المشروع.",
+          data: {
+            projectId,
+            remaining: pmAdvanceRemaining
+          }
+        }
+  ].filter(Boolean) as Suggestion[]
+
   return {
     status: 201,
     body: {
@@ -357,7 +570,9 @@ async function handleCreateOperationalExpense(
           recordedAt: expense.recordedAt,
           recordedByUserId: expense.recordedByUserId
         }
-      }
+      },
+      humanReadable,
+      suggestions
     }
   }
 }
@@ -374,7 +589,20 @@ async function handleResidentLookup(
       body: {
         success: false,
         error: "projectId and unitCode are required",
-        projectId: projectId || null
+        projectId: projectId || null,
+        humanReadable: {
+          en: "Please include both the project ID and the unit code so I can locate the residents.",
+          ar: "من فضلك أرسل رقم المشروع وكود الوحدة حتى أستطيع العثور على السكان."
+        },
+        suggestions: [
+          {
+            title: "تهيئة طلب الاستعلام",
+            prompt: "استخدم رقم المشروع وكود الوحدة معاً عندما تطلب بيانات السكان.",
+            data: {
+              requiredFields: ["projectId", "unitCode"]
+            }
+          }
+        ]
       }
     }
   }
@@ -385,7 +613,17 @@ async function handleResidentLookup(
       body: {
         success: false,
         error: "Project manager is not assigned to this project",
-        projectId
+        projectId,
+        humanReadable: {
+          en: "You are not assigned to this project, so I cannot share its residents.",
+          ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني مشاركة بيانات سكانه."
+        },
+        suggestions: [
+          {
+            title: "طلب إضافة المشروع",
+            prompt: "اطلب إضافة هذا المشروع لصلاحياتي ثم حاول مرة أخرى."
+          }
+        ]
       }
     }
   }
@@ -404,7 +642,20 @@ async function handleResidentLookup(
         success: false,
         error: "Operational unit not found",
         projectId,
-        issues: { unitCode }
+        issues: { unitCode },
+        humanReadable: {
+          en: "I could not find a unit with that code inside the project.",
+          ar: "لم أجد وحدة بهذا الكود داخل المشروع."
+        },
+        suggestions: [
+          {
+            title: "عرض أكواد الوحدات",
+            prompt: "اذكر لي أكواد الوحدات المتاحة في هذا المشروع.",
+            data: {
+              projectId
+            }
+          }
+        ]
       }
     }
   }
@@ -432,6 +683,50 @@ async function handleResidentLookup(
     take
   })
 
+  const namesSample = residents.slice(0, 3).map((resident) => resident.name ?? "ساكن بدون اسم")
+  const firstResident = residents[0]
+  const humanReadable: HumanReadable = residents.length
+    ? {
+        en: `Found ${residents.length} resident${residents.length === 1 ? "" : "s"} in unit ${unitCode}: ${namesSample.join(", ")}.`,
+        ar: `تم العثور على ${residents.length} من السكان في الوحدة ${unitCode}: ${namesSample.join("، ")}.`
+      }
+    : {
+        en: `No residents matched unit ${unitCode}.`,
+        ar: `لم يتم العثور على سكان للوحدة ${unitCode}.`
+      }
+
+  const suggestions: Suggestion[] = residents.length
+    ? [
+        firstResident
+          ? {
+              title: `التواصل مع ${firstResident.name ?? "أول ساكن"}`,
+              prompt: `جهز رسالة واتساب إلى ${firstResident.name ?? "السكان"} على الرقم ${firstResident.whatsappPhone ?? firstResident.phone}.`,
+              data: {
+                residentId: firstResident.id,
+                phone: firstResident.whatsappPhone ?? firstResident.phone
+              }
+            }
+          : undefined,
+        {
+          title: "عرض جميع السكان",
+          prompt: `اعرض جميع السكان في الوحدة ${unitCode} ببيانات الاتصال الخاصة بهم.`,
+          data: {
+            projectId,
+            unitCode
+          }
+        }
+      ].filter(Boolean) as Suggestion[]
+    : [
+        {
+          title: "مراجعة كود الوحدة",
+          prompt: "تأكد من كود الوحدة أو جرب وحدة أخرى في نفس المشروع.",
+          data: {
+            projectId,
+            unitCode
+          }
+        }
+      ]
+
   return {
     status: 200,
     body: {
@@ -444,7 +739,9 @@ async function handleResidentLookup(
       data: {
         residents
       },
-      message: residents.length === 0 ? "لا توجد بيانات سكان للوحدة" : undefined
+      message: residents.length === 0 ? "لا توجد بيانات سكان للوحدة" : undefined,
+      humanReadable,
+      suggestions
     }
   }
 }
@@ -461,7 +758,17 @@ async function handleTicketSummary(
       body: {
         success: false,
         error: "projectId is required",
-        projectId: null
+        projectId: null,
+        humanReadable: {
+          en: "I need the project ID to check its tickets.",
+          ar: "أحتاج رقم المشروع لمراجعة التذاكر الخاصة به."
+        },
+        suggestions: [
+          {
+            title: "إرسال رقم المشروع",
+            prompt: "ضمّن رقم المشروع عندما تطلب ملخص التذاكر."
+          }
+        ]
       }
     }
   }
@@ -472,7 +779,17 @@ async function handleTicketSummary(
       body: {
         success: false,
         error: "Project manager is not assigned to this project",
-        projectId
+        projectId,
+        humanReadable: {
+          en: "You are not assigned to this project, so I cannot share the tickets.",
+          ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني مشاركة التذاكر الخاصة به."
+        },
+        suggestions: [
+          {
+            title: "طلب إضافة المشروع",
+            prompt: "اطلب إضافة المشروع لصلاحياتي ثم أعد طلب ملخص التذاكر."
+          }
+        ]
       }
     }
   }
@@ -512,6 +829,57 @@ async function handleTicketSummary(
     take
   })
 
+  const statusCounts = tickets.reduce(
+    (acc, ticket) => {
+      acc.total += 1
+      acc[ticket.status] = (acc[ticket.status] ?? 0) + 1
+      return acc
+    },
+    { total: 0, NEW: 0, IN_PROGRESS: 0, DONE: 0 } as Record<string, number>
+  )
+
+  const scopeLabel = unitCode ? `unit ${unitCode}` : "all units"
+  const filteredStatusesLabel = validStatuses.length ? validStatuses.join(", ") : "all statuses"
+  const firstTicket = tickets[0]
+
+  const humanReadable: HumanReadable = tickets.length
+    ? {
+        en: `Found ${tickets.length} tickets for ${scopeLabel} (${filteredStatusesLabel}). NEW: ${statusCounts.NEW}, IN_PROGRESS: ${statusCounts.IN_PROGRESS}, DONE: ${statusCounts.DONE}.`,
+        ar: `تم العثور على ${tickets.length} تذكرة لـ ${unitCode ? `الوحدة ${unitCode}` : "جميع الوحدات"} (${filteredStatusesLabel}). جديد: ${statusCounts.NEW}، قيد التنفيذ: ${statusCounts.IN_PROGRESS}، منجز: ${statusCounts.DONE}.`
+      }
+    : {
+        en: `No tickets matched the filters for ${scopeLabel}.`,
+        ar: `لا توجد تذاكر مطابقة للمحددات لـ ${unitCode ? `الوحدة ${unitCode}` : "المشروع"}.`
+      }
+
+  const suggestions: Suggestion[] = tickets.length
+    ? [
+        firstTicket
+          ? {
+              title: "متابعة أول تذكرة",
+              prompt: `أعطني تفاصيل التذكرة ${firstTicket.id} مع آخر تحديث لها.`,
+              data: {
+                ticketId: firstTicket.id,
+                status: firstTicket.status
+              }
+            }
+          : undefined,
+        {
+          title: "تلخيص الحالات",
+          prompt: "لخّص حالة التذاكر في المشروع مع أولوية الأعلى خطورة."
+        }
+      ].filter(Boolean) as Suggestion[]
+    : [
+        {
+          title: "تخفيف المحددات",
+          prompt: "جرب إزالة المحددات أو زيادة الحد الأقصى للنتائج لرؤية تذاكر أخرى.",
+          data: {
+            limit,
+            statuses: validStatuses
+          }
+        }
+      ]
+
   return {
     status: 200,
     body: {
@@ -525,7 +893,9 @@ async function handleTicketSummary(
       data: {
         tickets
       },
-      message: tickets.length === 0 ? "لا توجد تذاكر بالمحددات الحالية" : undefined
+      message: tickets.length === 0 ? "لا توجد تذاكر بالمحددات الحالية" : undefined,
+      humanReadable,
+      suggestions
     }
   }
 }
@@ -639,7 +1009,9 @@ export async function POST(req: NextRequest) {
           ...(response.body as ActionSuccessPayload).meta
         },
         data: (response.body as ActionSuccessPayload).data,
-        message: (response.body as ActionSuccessPayload).message
+        message: (response.body as ActionSuccessPayload).message,
+        humanReadable: (response.body as ActionSuccessPayload).humanReadable,
+        suggestions: (response.body as ActionSuccessPayload).suggestions
       }
     : {
         success: false,
@@ -649,8 +1021,11 @@ export async function POST(req: NextRequest) {
         error: (response.body as ActionErrorPayload).error,
         issues: (response.body as ActionErrorPayload).issues,
         meta: {
-          managerName: manager.name
-        }
+          managerName: manager.name,
+          ...(response.body as ActionErrorPayload).meta
+        },
+        humanReadable: (response.body as ActionErrorPayload).humanReadable,
+        suggestions: (response.body as ActionErrorPayload).suggestions
       }
 
   await logWebhookEvent(

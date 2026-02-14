@@ -1,5 +1,9 @@
 interface N8nEventPayload {
-  eventType: "TICKET_CREATED" | "DELIVERY_ORDER_CREATED"
+  eventType:
+    | "TICKET_CREATED"
+    | "TICKET_UPDATED"
+    | "TICKET_RESOLVED"
+    | "DELIVERY_ORDER_CREATED"
   payload: Record<string, unknown>
 }
 

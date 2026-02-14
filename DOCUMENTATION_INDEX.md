@@ -92,6 +92,28 @@
 
 ---
 
+### 8. **AI INTERPRETER** → [AI_AGENT_NL_INTERPRETER.md](AI_AGENT_NL_INTERPRETER.md)
+**Best for:** n8n / AI automation flows
+- Natural-language → webhook mapping guide
+- Sample request/response payloads
+- Heuristic coverage and extension tips
+
+**Read time:** 7 minutes
+**Contains:** Integration contract for `/api/webhooks/query/interpret`
+
+---
+
+### 9. **ROLE WEBHOOKS** → [AI_AGENT_ROLE_APIS.md](AI_AGENT_ROLE_APIS.md)
+**Best for:** Implementers wiring manager/accountant/admin flows
+- Complete webhook list per role
+- Required fields and sample payloads
+- Response tips and follow-up checklist
+
+**Read time:** 8 minutes
+**Contains:** Usage manual for all AI-facing endpoints
+
+---
+
 ## 🎯 Read Based on Your Role
 
 ### 👤 **For Managers/Business Users**

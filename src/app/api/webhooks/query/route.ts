@@ -3,6 +3,53 @@ import { db } from "@/lib/db"
 import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { buildPhoneVariants } from "@/lib/phone"
 
+type HumanReadable = {
+  en?: string
+  ar?: string
+}
+
+type Suggestion = {
+  title: string
+  prompt: string
+  data?: Record<string, unknown>
+}
+
+function formatNumber(value: number) {
+  try {
+    return value.toLocaleString("en-US")
+  } catch {
+    return String(value)
+  }
+}
+
+function formatCurrency(amount: number) {
+  try {
+    return amount.toLocaleString("en-US", {
+      minimumFractionDigits: amount % 1 === 0 ? 0 : 2,
+      maximumFractionDigits: 2
+    })
+  } catch {
+    return String(amount)
+  }
+}
+
+function formatDate(date: Date | string) {
+  const parsed = typeof date === "string" ? new Date(date) : date
+  if (!(parsed instanceof Date) || Number.isNaN(parsed.getTime())) {
+    return null
+  }
+
+  try {
+    return parsed.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric"
+    })
+  } catch {
+    return parsed.toISOString().split("T")[0] ?? null
+  }
+}
+
 type WebhookResponse<Data = unknown> = {
   success: true
   role: string
@@ -11,6 +58,8 @@ type WebhookResponse<Data = unknown> = {
   meta?: Record<string, unknown>
   data: Data
   message?: string
+  humanReadable?: HumanReadable
+  suggestions?: Suggestion[]
 }
 
 function buildWebhookResponse<Data>(options: {
@@ -20,6 +69,8 @@ function buildWebhookResponse<Data>(options: {
   data: Data
   meta?: Record<string, unknown>
   message?: string
+  humanReadable?: HumanReadable
+  suggestions?: Suggestion[]
 }): WebhookResponse<Data> {
   return {
     success: true,
@@ -28,7 +79,9 @@ function buildWebhookResponse<Data>(options: {
     projectId: options.projectId ?? null,
     meta: options.meta,
     data: options.data,
-    message: options.message
+    message: options.message,
+    humanReadable: options.humanReadable,
+    suggestions: options.suggestions
   }
 }
 
@@ -211,6 +264,35 @@ export async function GET(req: NextRequest) {
           (sum, inv) => sum + (inv.amount - inv.payments.reduce((s, p) => s + p.amount, 0)),
           0
         )
+        const pendingNotesCount = accountingNotes.length
+        const collectionBase = totalPaid + totalRemaining
+        const collectionRate = collectionBase > 0 ? Math.round((totalPaid / collectionBase) * 100) : null
+
+        const humanReadable: HumanReadable = {
+          en: `Accounting snapshot ready: ${formatNumber(totalInvoices)} invoices, ${formatCurrency(totalPaid)} collected, ${formatCurrency(totalRemaining)} outstanding${collectionRate !== null ? ` (collection rate ${collectionRate}% ).` : "."} Pending notes: ${formatNumber(pendingNotesCount)}.`,
+          ar: `تم تجهيز ملخص الحسابات: ${formatNumber(totalInvoices)} فاتورة، تم تحصيل ${formatCurrency(totalPaid)}، والمتبقي ${formatCurrency(totalRemaining)}${collectionRate !== null ? ` (معدل التحصيل ${collectionRate}% ).` : "."} عدد الملاحظات المعلقة ${formatNumber(pendingNotesCount)}.`
+        }
+
+        const topPendingNote = accountingNotes[0]
+        const suggestions: Suggestion[] = [
+          topPendingNote
+            ? {
+                title: "مراجعة أول ملاحظة",
+                prompt: `افتح تفاصيل الملاحظة المحاسبية ${topPendingNote.id} للوحدة ${topPendingNote.unit.code}.`,
+                data: {
+                  noteId: topPendingNote.id,
+                  projectId: topPendingNote.projectId
+                }
+              }
+            : undefined,
+          {
+            title: "قائمة الفواتير المتأخرة",
+            prompt: "هات لي الفواتير التي عليها أرصدة متأخرة مرتبة من الأكبر للأصغر.",
+            data: {
+              focus: "aging"
+            }
+          }
+        ].filter(Boolean) as Suggestion[]
 
         responsePayload = buildWebhookResponse({
           role: "ACCOUNTANT",
@@ -244,7 +326,9 @@ export async function GET(req: NextRequest) {
               createdBy: note.createdByUser.name,
               createdAt: note.createdAt
             }))
-          }
+          },
+          humanReadable,
+          suggestions
         })
       }
 
@@ -272,6 +356,29 @@ export async function GET(req: NextRequest) {
           db.technician.findMany({ include: { specialty: true } }),
           db.staff.findMany()
         ])
+
+        const openTickets = tickets.filter((t) => t.status !== "DONE")
+        const humanReadable: HumanReadable = {
+          en: `Admin overview: ${formatNumber(projects.length)} projects, ${formatNumber(operationalUnits.length)} units, ${formatNumber(residents.length)} residents, and ${formatNumber(openTickets.length)} open tickets.`,
+          ar: `نظرة عامة للإدارة: ${formatNumber(projects.length)} مشروع، ${formatNumber(operationalUnits.length)} وحدة، ${formatNumber(residents.length)} ساكن، و ${formatNumber(openTickets.length)} تذكرة مفتوحة.`
+        }
+
+        const suggestions: Suggestion[] = [
+          openTickets.length
+            ? {
+                title: "متابعة التذاكر المفتوحة",
+                prompt: "هات لي التذاكر المفتوحة مرتبة بالأولوية مع أقدمية الإنشاء.",
+                data: {
+                  focus: "tickets",
+                  status: "OPEN"
+                }
+              }
+            : undefined,
+          {
+            title: "تحليل المشاريع",
+            prompt: "قارن بين المشاريع من حيث عدد الوحدات والسكان النشطين."
+          }
+        ].filter(Boolean) as Suggestion[]
 
         responsePayload = buildWebhookResponse({
           role: "ADMIN",
@@ -311,7 +418,9 @@ export async function GET(req: NextRequest) {
               phone: t.phone,
               specialty: t.specialty?.name ?? null
             }))
-          }
+          },
+          humanReadable,
+          suggestions
         })
       }
 
@@ -403,6 +512,47 @@ export async function GET(req: NextRequest) {
           take: rangeParam === "TODAY" || dateParam ? 10 : 50
         })
 
+        const totalAmount = notes.reduce((sum, note) => sum + note.amount, 0)
+        const periodLabel = rangeParam || (dateParam ? `DATE ${dateParam}` : "ALL TIME")
+        const humanReadable: HumanReadable = notes.length
+          ? {
+              en: `Found ${formatNumber(notes.length)} expense note${notes.length === 1 ? "" : "s"} for filters (${periodLabel}) totaling ${formatCurrency(totalAmount)}.`,
+              ar: `تم العثور على ${formatNumber(notes.length)} من ملاحظات المصروفات حسب الفلاتر (${periodLabel}) بإجمالي ${formatCurrency(totalAmount)}.`
+            }
+          : {
+              en: `No expenses matched the filters (${periodLabel}).`,
+              ar: `لا توجد مصروفات مطابقة للفلاتر (${periodLabel}).`
+            }
+
+        const topNote = notes[0]
+        const suggestions: Suggestion[] = notes.length
+          ? [
+              topNote
+                ? {
+                    title: "تفاصيل أحدث مصروف",
+                    prompt: `هات تفاصيل الملاحظة ${topNote.id} مع مَن سجلها والوحدة الخاصة بها.`,
+                    data: {
+                      noteId: topNote.id,
+                      unitCode: topNote.unit.code
+                    }
+                  }
+                : undefined,
+              {
+                title: "مقارنة بالمقدم",
+                prompt: "قارن إجمالي المصروفات مع رصيد مقدم المدير الحالي."
+              }
+            ].filter(Boolean) as Suggestion[]
+          : [
+              {
+                title: "توسيع نطاق البحث",
+                prompt: "جرّب عرض مصروفات الأسبوع أو الشهر لو لقيت اليوم فاضي.",
+                data: {
+                  currentRange: rangeParam,
+                  unit: unitFilter
+                }
+              }
+            ]
+
         const response = buildWebhookResponse({
           role: "PROJECT_MANAGER",
           type: queryType,
@@ -425,9 +575,11 @@ export async function GET(req: NextRequest) {
               unit: note.unit,
               createdBy: note.createdByUser
             })),
-            totalAmount: notes.reduce((sum, note) => sum + note.amount, 0)
+            totalAmount
           },
-          message: notes.length === 0 ? "لا توجد مصروفات مطابقة للمعايير المدخلة" : undefined
+          message: notes.length === 0 ? "لا توجد مصروفات مطابقة للمعايير المدخلة" : undefined,
+          humanReadable,
+          suggestions
         })
 
         await logWebhookEvent(
@@ -474,6 +626,25 @@ export async function GET(req: NextRequest) {
               }
             })
           ])
+
+        const openTicketsCount = tickets.filter((t) => t.status !== "DONE").length
+        const humanReadable: HumanReadable = {
+          en: `Project dashboard: ${project?.name ?? "Unknown"} has ${formatNumber(units.length)} units, ${formatNumber(residents.length)} residents, and ${formatNumber(openTicketsCount)} open tickets.`,
+          ar: `لوحة المشروع: ${project?.name ?? "غير معروف"} يحتوي على ${formatNumber(units.length)} وحدة، ${formatNumber(residents.length)} ساكن، و ${formatNumber(openTicketsCount)} تذكرة مفتوحة.`
+        }
+
+        const suggestions: Suggestion[] = [
+          {
+            title: "أعلى الوحدات ضغطاً",
+            prompt: "حلل الوحدات التي لديها أكبر عدد من التذاكر المفتوحة."
+          },
+          residents.length
+            ? {
+                title: "تواصل مع السكان",
+                prompt: "جهز رسالة للسكان لإبلاغهم بآخر تحديثات المشروع."
+              }
+            : undefined
+        ].filter(Boolean) as Suggestion[]
 
         responsePayload = buildWebhookResponse({
           role: "PROJECT_MANAGER",
@@ -527,7 +698,9 @@ export async function GET(req: NextRequest) {
               role: s.role,
               phone: s.phone
             }))
-          }
+          },
+          humanReadable,
+          suggestions
         })
       }
 
@@ -575,7 +748,20 @@ export async function GET(req: NextRequest) {
               resident: null,
               tickets: []
             },
-            message: "لم يتم العثور على مقيم بهذه البيانات"
+            message: "لم يتم العثور على مقيم بهذه البيانات",
+            humanReadable: {
+              en: `No resident matched "${residentInput}" in this project.`,
+              ar: `لا يوجد ساكن مطابق لـ "${residentInput}" في هذا المشروع.`
+            },
+            suggestions: [
+              {
+                title: "تأكيد بيانات الساكن",
+                prompt: "راجع اسم الساكن أو جرب رقم الهاتف بالكامل بما في ذلك كود الدولة.",
+                data: {
+                  searchTerm: residentInput
+                }
+              }
+            ]
           })
 
           await logWebhookEvent(
@@ -638,7 +824,39 @@ export async function GET(req: NextRequest) {
               },
               assignedTo: ticket.assignedTo
             }))
-          }
+          },
+          humanReadable: residentTickets.length
+            ? {
+                en: `Resident ${residentMatch.name ?? "N/A"} has ${formatNumber(residentTickets.length)} ticket${residentTickets.length === 1 ? "" : "s"}.`,
+                ar: `الساكن ${residentMatch.name ?? "غير معروف"} لديه ${formatNumber(residentTickets.length)} تذكرة.`
+              }
+            : {
+                en: `Resident ${residentMatch.name ?? "N/A"} has no tickets.`,
+                ar: `الساكن ${residentMatch.name ?? "غير معروف"} لا يملك تذاكر.`
+              },
+          suggestions: residentTickets.length
+            ? [
+                {
+                  title: "متابعة آخر تذكرة",
+                  prompt: `هات تحديث للتذكرة ${residentTickets[0].id} وأين وصلت حتى الآن.`,
+                  data: {
+                    ticketId: residentTickets[0].id
+                  }
+                },
+                {
+                  title: "تنبيه الساكن",
+                  prompt: `اكتب رسالة للساكن ${residentMatch.name ?? ""} بخصوص حالة التذكرة الحالية.`,
+                  data: {
+                    residentId: residentMatch.id
+                  }
+                }
+              ]
+            : [
+                {
+                  title: "فتح تذكرة جديدة",
+                  prompt: "أنشئ تذكرة خدمة جديدة لهذا الساكن."
+                }
+              ]
         })
 
         await logWebhookEvent(
@@ -673,6 +891,34 @@ export async function GET(req: NextRequest) {
           include: { resident: true, unit: true }
         })
 
+        const humanReadable: HumanReadable = tickets.length
+          ? {
+              en: `Logged ${formatNumber(tickets.length)} ticket${tickets.length === 1 ? "" : "s"} today for the project.`,
+              ar: `تم تسجيل ${formatNumber(tickets.length)} تذكرة اليوم للمشروع.`
+            }
+          : {
+              en: "No new tickets were created today.",
+              ar: "لم يتم إنشاء تذاكر جديدة اليوم."
+            }
+
+        const suggestions: Suggestion[] = tickets.length
+          ? [
+              {
+                title: "تحديد أعلى أولوية",
+                prompt: "هات التذاكر ذات الأولوية العالية بين تذاكر اليوم."
+              },
+              {
+                title: "التواصل مع السكان",
+                prompt: "جهز رسائل للسكان الذين فتحوا تذاكر اليوم لإبلاغهم بآخر المستجدات."
+              }
+            ]
+          : [
+              {
+                title: "مراجعة التذاكر السابقة",
+                prompt: "اعرض التذاكر المفتوحة من الأيام السابقة لمتابعتها."
+              }
+            ]
+
         responsePayload = buildWebhookResponse({
           role: "PROJECT_MANAGER",
           type: queryType,
@@ -694,7 +940,9 @@ export async function GET(req: NextRequest) {
               unitName: t.unit.name,
               createdAt: t.createdAt
             }))
-          }
+          },
+          humanReadable,
+          suggestions
         })
       }
 
@@ -710,7 +958,17 @@ export async function GET(req: NextRequest) {
           type: queryType,
           data: {},
           message:
-            "Residents cannot query via webhooks. Please use the dashboard."
+            "Residents cannot query via webhooks. Please use the dashboard.",
+          humanReadable: {
+            en: "Please use the resident dashboard to check your tickets.",
+            ar: "من فضلك استخدم لوحة الساكن لمراجعة تذاكرك."
+          },
+          suggestions: [
+            {
+              title: "فتح لوحة الساكن",
+              prompt: "افتح لوحة الساكن وسجل الدخول لمتابعة التذاكر."
+            }
+          ]
         })
       }
     }
@@ -721,7 +979,17 @@ export async function GET(req: NextRequest) {
         role: auth.context.role,
         type: queryType,
         data: {},
-        message: "No data available for this query"
+        message: "No data available for this query",
+        humanReadable: {
+          en: "No records matched this query.",
+          ar: "لا توجد نتائج للاستعلام المطلوب."
+        },
+        suggestions: [
+          {
+            title: "تعديل الاستعلام",
+            prompt: "غيّر نوع الاستعلام أو أضف محددات مختلفة لعرض بيانات أخرى."
+          }
+        ]
       })
 
     const auditContext: Record<string, unknown> = { type: queryType }
