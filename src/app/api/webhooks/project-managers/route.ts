@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 
+import type { Prisma } from "@prisma/client"
+
 import { db } from "@/lib/db"
 import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { buildPhoneVariants } from "@/lib/phone"
@@ -9,7 +11,10 @@ const ENDPOINT = "/api/webhooks/project-managers"
 const ALLOWED_ACTIONS = [
   "CREATE_OPERATIONAL_EXPENSE",
   "GET_RESIDENT_PHONE",
-  "LIST_PROJECT_TICKETS"
+  "LIST_PROJECT_TICKETS",
+  "LIST_PROJECT_UNITS",
+  "LIST_UNIT_EXPENSES",
+  "GET_LAST_ELECTRICITY_TOPUP"
 ] as const
 
 type AllowedAction = (typeof ALLOWED_ACTIONS)[number]
@@ -35,6 +40,27 @@ type ActionMap = {
     unitCode?: string | null
     statuses?: string[]
     limit?: number | string
+  }
+  LIST_PROJECT_UNITS: {
+    projectId: string
+    includeInactive?: boolean
+    limit?: number | string
+    search?: string | null
+  }
+  LIST_UNIT_EXPENSES: {
+    projectId: string
+    unitCode?: string | null
+    limit?: number | string
+    sourceTypes?: Array<
+      "TECHNICIAN_WORK" | "STAFF_WORK" | "ELECTRICITY" | "OTHER"
+    >
+    search?: string | null
+    fromDate?: string | null
+    toDate?: string | null
+  }
+  GET_LAST_ELECTRICITY_TOPUP: {
+    projectId: string
+    unitCode?: string | null
   }
 }
 
@@ -92,6 +118,40 @@ type GenericActionHandler = (
   payload: Record<string, unknown>
 ) => Promise<HandlerResponse>
 
+const EXPENSE_SOURCE_TYPES = [
+  "TECHNICIAN_WORK",
+  "STAFF_WORK",
+  "ELECTRICITY",
+  "OTHER"
+] as const
+
+type ExpenseSourceType = (typeof EXPENSE_SOURCE_TYPES)[number]
+
+type UnitExpenseWithRelations = Prisma.UnitExpenseGetPayload<{
+  include: {
+    unit: {
+      select: {
+        id: true
+        code: true
+        name: true
+      }
+    }
+    recordedByUser: {
+      select: {
+        id: true
+        name: true
+      }
+    }
+    pmAdvance: {
+      select: {
+        id: true
+        amount: true
+        remainingAmount: true
+      }
+    }
+  }
+}>
+
 function buildManagerContext(manager: ManagerRecord) {
   return {
     id: manager.id,
@@ -113,6 +173,60 @@ function parseLimit(input: unknown, fallback = 5, max = 25) {
     return fallback
   }
   return Math.min(Math.trunc(numeric), max)
+}
+
+function parseDateInput(value: unknown, label: string): Date | null {
+  if (value === null || value === undefined || value === "") {
+    return null
+  }
+
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be an ISO date string`)
+  }
+
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`${label} is invalid; use YYYY-MM-DD`)
+  }
+
+  return parsed
+}
+
+function buildDateRangeLabel(
+  fromDate: Date | null,
+  toDate: Date | null,
+  locale: "en" | "ar"
+) {
+  if (!fromDate && !toDate) {
+    return ""
+  }
+
+  const fromLabel = fromDate ? formatDate(fromDate) : null
+  const toLabel = toDate ? formatDate(toDate) : null
+
+  if (locale === "en") {
+    if (fromLabel && toLabel) {
+      return ` between ${fromLabel} and ${toLabel}`
+    }
+    if (fromLabel) {
+      return ` since ${fromLabel}`
+    }
+    if (toLabel) {
+      return ` up to ${toLabel}`
+    }
+  } else {
+    if (fromLabel && toLabel) {
+      return ` بين ${fromLabel} و ${toLabel}`
+    }
+    if (fromLabel) {
+      return ` منذ ${fromLabel}`
+    }
+    if (toLabel) {
+      return ` حتى ${toLabel}`
+    }
+  }
+
+  return ""
 }
 
 function formatCurrency(amount: number) {
@@ -878,16 +992,713 @@ async function handleTicketSummary(
   }
 }
 
+async function handleProjectUnitsList(
+  manager: ManagerRecord,
+  payload: ActionMap["LIST_PROJECT_UNITS"]
+): Promise<HandlerResponse> {
+  const { projectId, includeInactive, limit, search } = payload
+
+  if (!projectId) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "projectId is required",
+        projectId: null,
+        humanReadable: {
+          en: "I need the project ID to list its units.",
+          ar: "أحتاج رقم المشروع حتى أستعرض وحداته."
+        },
+        suggestions: [
+          {
+            title: "تحديد المشروع",
+            prompt: "اذكر رقم المشروع ثم اطلب عرض الوحدات."
+          }
+        ]
+      }
+    }
+  }
+
+  if (!assertProjectAccess(manager, projectId)) {
+    return {
+      status: 403,
+      body: {
+        success: false,
+        error: "Project manager is not assigned to this project",
+        projectId,
+        humanReadable: {
+          en: "You are not assigned to this project, so I cannot show its units.",
+          ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني عرض وحداته."
+        },
+        suggestions: [
+          {
+            title: "طلب إضافة المشروع",
+            prompt: "اطلب إضافة المشروع لصلاحياتي ثم أعد طلب قائمة الوحدات.",
+            data: {
+              managerId: manager.id,
+              projectId
+            }
+          }
+        ]
+      }
+    }
+  }
+
+  const take = parseLimit(limit, 15, 50)
+  const normalizedSearch = typeof search === "string" && search.trim().length > 0 ? search.trim() : null
+
+  const units = await db.operationalUnit.findMany({
+    where: {
+      projectId,
+      ...(includeInactive ? {} : { isActive: true }),
+      ...(normalizedSearch
+        ? {
+            OR: [
+              {
+                code: {
+                  contains: normalizedSearch
+                }
+              },
+              {
+                name: {
+                  contains: normalizedSearch
+                }
+              }
+            ]
+          }
+        : {})
+    },
+    select: {
+      id: true,
+      code: true,
+      name: true,
+      type: true,
+      isActive: true,
+      monthlyBillingDay: true,
+      monthlyManagementFee: true,
+      _count: {
+        select: {
+          residents: true,
+          tickets: true
+        }
+      }
+    },
+    orderBy: { code: "asc" },
+    take
+  })
+
+  const firstUnit = units[0]
+  const activeUnits = units.filter((unit) => unit.isActive).length
+  const searchLabel = normalizedSearch ? ` matching "${normalizedSearch}"` : ""
+
+  const humanReadable: HumanReadable = units.length
+    ? {
+        en: `Found ${units.length} units${includeInactive ? " (including inactive)" : ""}${searchLabel}. ${activeUnits} active.`,
+        ar: `تم العثور على ${units.length} وحدة${includeInactive ? " (بما فيها المتوقفة)" : ""}${normalizedSearch ? ` مطابقة لـ "${normalizedSearch}"` : ""}. ${activeUnits} نشطة.`
+      }
+    : {
+        en: normalizedSearch
+          ? `No units matched "${normalizedSearch}" in this project.`
+          : "No units found for this project.",
+        ar: normalizedSearch
+          ? `لا توجد وحدات مطابقة لـ "${normalizedSearch}" في هذا المشروع.`
+          : "لم يتم العثور على وحدات لهذا المشروع."
+      }
+
+  const suggestions: Suggestion[] = units.length
+    ? [
+        firstUnit
+          ? {
+              title: `استعلام سكان ${firstUnit.code}`,
+              prompt: `هات سكان الوحدة ${firstUnit.code} في المشروع ${projectId}.`,
+              data: {
+                projectId,
+                unitCode: firstUnit.code
+              }
+            }
+          : undefined,
+        includeInactive
+          ? undefined
+          : {
+              title: "عرض الوحدات المتوقفة",
+              prompt: `هات وحدات المشروع ${projectId} بما فيها المتوقفة.`,
+              data: {
+                projectId,
+                includeInactive: true
+              }
+            },
+        normalizedSearch
+          ? undefined
+          : {
+              title: "بحث باسم او كود",
+              prompt: "دور على وحدة حسب الكود أو الاسم داخل نفس المشروع.",
+              data: {
+                projectId
+              }
+            }
+      ].filter(Boolean) as Suggestion[]
+    : [
+        {
+          title: "تحقق من المشروع",
+          prompt: "تأكد من أن المشروع يحتوي على وحدات أو جرّب مشروعاً آخر.",
+          data: {
+            projectId
+          }
+        }
+      ]
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      projectId,
+      meta: {
+        includeInactive: !!includeInactive,
+        count: units.length,
+        search: normalizedSearch
+      },
+      data: {
+        units
+      },
+      humanReadable,
+      suggestions
+    }
+  }
+}
+
+async function handleUnitExpensesList(
+  manager: ManagerRecord,
+  payload: ActionMap["LIST_UNIT_EXPENSES"]
+): Promise<HandlerResponse> {
+  const { projectId, unitCode, limit, sourceTypes, search, fromDate, toDate } = payload
+
+  if (!projectId) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "projectId is required",
+        projectId: null,
+        humanReadable: {
+          en: "I need the project ID to list its expenses.",
+          ar: "أحتاج رقم المشروع حتى أستعرض المصروفات."
+        },
+        suggestions: [
+          {
+            title: "تحديد المشروع",
+            prompt: "اذكر رقم المشروع ثم اطلب عرض مصروفات الوحدة."
+          }
+        ]
+      }
+    }
+  }
+
+  if (!assertProjectAccess(manager, projectId)) {
+    return {
+      status: 403,
+      body: {
+        success: false,
+        error: "Project manager is not assigned to this project",
+        projectId,
+        humanReadable: {
+          en: "You are not assigned to this project, so I cannot show its expenses.",
+          ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني عرض مصروفاته."
+        },
+        suggestions: [
+          {
+            title: "طلب إضافة المشروع",
+            prompt: "اطلب إضافة المشروع لصلاحياتي ثم أعد طلب مصروفات الوحدة.",
+            data: {
+              managerId: manager.id,
+              projectId
+            }
+          }
+        ]
+      }
+    }
+  }
+
+  let unit: { id: string; code: string | null } | null = null
+
+  if (unitCode) {
+    unit = await db.operationalUnit.findFirst({
+      where: {
+        projectId,
+        code: unitCode
+      },
+      select: {
+        id: true,
+        code: true
+      }
+    })
+
+    if (!unit) {
+      return {
+        status: 404,
+        body: {
+          success: false,
+          error: "Operational unit not found",
+          projectId,
+          issues: { unitCode },
+          humanReadable: {
+            en: "I could not find that unit inside the project, so there are no expenses to show.",
+            ar: "لم أجد هذه الوحدة داخل المشروع، لذلك لا توجد مصروفات أعرضها."
+          },
+          suggestions: [
+            {
+              title: "عرض أكواد الوحدات",
+              prompt: "هات أكواد الوحدات المتاحة في هذا المشروع.",
+              data: {
+                projectId
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+
+  const validSourceTypes: ExpenseSourceType[] = Array.isArray(sourceTypes)
+    ? sourceTypes.filter((type: string): type is ExpenseSourceType =>
+        EXPENSE_SOURCE_TYPES.includes(type as ExpenseSourceType)
+      )
+    : []
+
+  let fromDateValue: Date | null = null
+  let toDateValue: Date | null = null
+
+  try {
+    fromDateValue = parseDateInput(fromDate, "fromDate")
+    toDateValue = parseDateInput(toDate, "toDate")
+  } catch (error) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: (error as Error).message,
+        projectId,
+        humanReadable: {
+          en: "The date filter is invalid. Use YYYY-MM-DD format.",
+          ar: "تصفية التاريخ غير صحيحة. استخدم صيغة YYYY-MM-DD."
+        }
+      }
+    }
+  }
+
+  if (fromDateValue && toDateValue && fromDateValue > toDateValue) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "fromDate must be before toDate",
+        projectId,
+        issues: { fromDate, toDate },
+        humanReadable: {
+          en: "The start date must be before the end date.",
+          ar: "تاريخ البداية يجب أن يكون قبل تاريخ النهاية."
+        }
+      }
+    }
+  }
+
+  const take = parseLimit(limit, 10, 50)
+  const normalizedSearch = typeof search === "string" && search.trim().length > 0 ? search.trim() : null
+
+  if (fromDateValue) {
+    fromDateValue.setHours(0, 0, 0, 0)
+  }
+  if (toDateValue) {
+    toDateValue.setHours(23, 59, 59, 999)
+  }
+
+  const dateFilters: Prisma.DateTimeFilter = {}
+  if (fromDateValue) {
+    dateFilters.gte = fromDateValue
+  }
+  if (toDateValue) {
+    dateFilters.lte = toDateValue
+  }
+
+  const whereClause: Prisma.UnitExpenseWhereInput = {
+    unit: {
+      projectId,
+      ...(unit ? { id: unit.id } : {})
+    }
+  }
+
+  if (validSourceTypes.length > 0) {
+    whereClause.sourceType = { in: validSourceTypes }
+  }
+
+  if (normalizedSearch) {
+    whereClause.description = {
+      contains: normalizedSearch
+    }
+  }
+
+  if (Object.keys(dateFilters).length > 0) {
+    whereClause.date = dateFilters
+  }
+
+  const expenses = (await db.unitExpense.findMany({
+    where: whereClause,
+    include: {
+      unit: {
+        select: {
+          id: true,
+          code: true,
+          name: true
+        }
+      },
+      recordedByUser: {
+        select: {
+          id: true,
+          name: true
+        }
+      },
+      pmAdvance: {
+        select: {
+          id: true,
+          amount: true,
+          remainingAmount: true
+        }
+      }
+    },
+    orderBy: { date: "desc" },
+    take
+  })) as UnitExpenseWithRelations[]
+
+  const totalAmount = expenses.reduce((sum, expense) => sum + (expense.amount ?? 0), 0)
+  const latestExpense = expenses[0]
+  const unitCodes = Array.from(
+    new Set(
+      expenses
+        .map((expense) => expense.unit?.code)
+        .filter((code): code is string => typeof code === "string" && code.length > 0)
+    )
+  )
+  const unitLabel = unit
+    ? unit.code ?? "unit"
+    : unitCodes.length
+      ? `${unitCodes.length} units`
+      : "project"
+  const latestDateLabel = latestExpense ? formatDate(latestExpense.date) : null
+
+  const humanReadable: HumanReadable = expenses.length
+    ? {
+        en: `Found ${expenses.length} expenses for ${unit ? `unit ${unitLabel}` : `the project`} totalling ${formatCurrency(totalAmount)}${normalizedSearch ? ` matching "${normalizedSearch}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "en") : ""}.${latestDateLabel ? ` Latest on ${latestDateLabel}.` : ""}`,
+        ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} لـ ${unit ? `الوحدة ${unitLabel}` : "المشروع"} بإجمالي ${formatCurrency(totalAmount)}${normalizedSearch ? ` مطابقة لـ "${normalizedSearch}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "ar") : ""}.${latestDateLabel ? ` آخر مصروف بتاريخ ${latestDateLabel}.` : ""}`
+      }
+    : {
+        en: unit
+          ? normalizedSearch
+            ? `No expenses matched "${normalizedSearch}" for unit ${unitLabel}.`
+            : `No expenses recorded yet for unit ${unitLabel}.`
+          : normalizedSearch
+            ? `No expenses matched "${normalizedSearch}" for this project.`
+            : fromDateValue || toDateValue
+              ? "No expenses found for the selected date range."
+              : "No expenses recorded yet for this project.",
+        ar: unit
+          ? normalizedSearch
+            ? `لا توجد مصروفات مطابقة لـ "${normalizedSearch}" للوحدة ${unitLabel}.`
+            : `لا توجد مصروفات مسجلة حتى الآن للوحدة ${unitLabel}.`
+          : normalizedSearch
+            ? `لا توجد مصروفات مطابقة لـ "${normalizedSearch}" لهذا المشروع.`
+            : fromDateValue || toDateValue
+              ? "لا توجد مصروفات في نطاق التاريخ المحدد."
+              : "لا توجد مصروفات مسجلة لهذا المشروع."
+      }
+
+  const suggestions: Suggestion[] = expenses.length
+    ? [
+        latestExpense
+          ? {
+              title: "تفاصيل آخر مصروف",
+              prompt: `هات تفاصيل المصروف ${latestExpense.id}.`,
+              data: {
+                expenseId: latestExpense.id,
+                projectId,
+                unitCode: unit ? unit.code : latestExpense.unit?.code
+              }
+            }
+          : undefined,
+        unit
+          ? undefined
+          : {
+              title: "تصفية لوحدة محددة",
+              prompt: "هات مصروفات الوحدة بكود معين داخل نفس المشروع.",
+              data: {
+                projectId
+              }
+            },
+        normalizedSearch
+          ? undefined
+          : {
+              title: "بحث في الوصف",
+              prompt: "دور على مصروفات تحتوي كلمة معينة في الوصف داخل المشروع.",
+              data: {
+                projectId,
+                unitCode
+              }
+            },
+        fromDateValue || toDateValue
+          ? {
+              title: "تعديل نطاق التاريخ",
+              prompt: "غير فترة التاريخ وابحث مرة أخرى عن المصروفات.",
+              data: {
+                projectId,
+                unitCode
+              }
+            }
+          : undefined
+      ].filter(Boolean) as Suggestion[]
+    : [
+        {
+          title: "تسجيل مصروف جديد",
+          prompt: "سجل مصروف تشغيلي جديد للوحدة مع التفاصيل المطلوبة.",
+          data: {
+            projectId,
+            unitCode
+          }
+        },
+        fromDateValue || toDateValue
+          ? {
+              title: "تعديل نطاق التاريخ",
+              prompt: "غير فترة التاريخ وابحث مرة أخرى عن المصروفات.",
+              data: {
+                projectId,
+                unitCode
+              }
+            }
+          : undefined
+      ].filter(Boolean) as Suggestion[]
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      projectId,
+      meta: {
+        unitCode: unit?.code ?? null,
+        count: expenses.length,
+        totalAmount,
+        filteredSourceTypes: validSourceTypes,
+        search: normalizedSearch,
+        fromDate: fromDateValue ? formatDate(fromDateValue) : null,
+        toDate: toDateValue ? formatDate(toDateValue) : null
+      },
+      data: {
+        expenses
+      },
+      humanReadable,
+      suggestions
+    }
+  }
+}
+
+async function handleLastElectricityTopup(
+  manager: ManagerRecord,
+  payload: ActionMap["GET_LAST_ELECTRICITY_TOPUP"]
+): Promise<HandlerResponse> {
+  const { projectId, unitCode } = payload
+
+  if (!projectId) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "projectId is required",
+        projectId: null,
+        humanReadable: {
+          en: "I need the project ID to check electricity top-ups.",
+          ar: "أحتاج رقم المشروع حتى أتحقق من آخر شحن كهرباء."
+        },
+        suggestions: [
+          {
+            title: "تحديد المشروع",
+            prompt: "اذكر رقم المشروع ثم اسأل عن شحن الكهرباء."
+          }
+        ]
+      }
+    }
+  }
+
+  if (!assertProjectAccess(manager, projectId)) {
+    return {
+      status: 403,
+      body: {
+        success: false,
+        error: "Project manager is not assigned to this project",
+        projectId,
+        humanReadable: {
+          en: "You are not assigned to this project, so I cannot show its electricity top-ups.",
+          ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني عرض شحنات الكهرباء الخاصة به."
+        },
+        suggestions: [
+          {
+            title: "طلب إضافة المشروع",
+            prompt: "اطلب إضافة المشروع لصلاحياتي ثم أعد طلب شحن الكهرباء.",
+            data: {
+              managerId: manager.id,
+              projectId
+            }
+          }
+        ]
+      }
+    }
+  }
+
+  let unit: { id: string; code: string | null } | null = null
+
+  if (unitCode) {
+    unit = await db.operationalUnit.findFirst({
+      where: {
+        projectId,
+        code: unitCode
+      },
+      select: {
+        id: true,
+        code: true
+      }
+    })
+
+    if (!unit) {
+      return {
+        status: 404,
+        body: {
+          success: false,
+          error: "Operational unit not found",
+          projectId,
+          issues: { unitCode },
+          humanReadable: {
+            en: "I could not find that unit inside the project, so I cannot check its electricity top-ups.",
+            ar: "لم أجد هذه الوحدة داخل المشروع، لذلك لا أستطيع التحقق من شحن كهربائها."
+          },
+          suggestions: [
+            {
+              title: "عرض الوحدات",
+              prompt: "هات الوحدات المتاحة في هذا المشروع.",
+              data: {
+                projectId
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+
+  const topup = (await db.unitExpense.findFirst({
+    where: {
+      sourceType: "ELECTRICITY",
+      unit: {
+        projectId,
+        ...(unit ? { id: unit.id } : {})
+      }
+    },
+    include: {
+      unit: {
+        select: {
+          id: true,
+          code: true,
+          name: true
+        }
+      },
+      recordedByUser: {
+        select: {
+          id: true,
+          name: true
+        }
+      }
+    },
+    orderBy: { date: "desc" }
+  })) as UnitExpenseWithRelations | null
+
+  const humanReadable: HumanReadable = topup
+    ? {
+        en: `Last electricity top-up was ${formatCurrency(topup.amount)} on ${formatDate(topup.date)} for unit ${topup.unit?.code ?? "unknown"}.`,
+        ar: `آخر شحن كهرباء كان بقيمة ${formatCurrency(topup.amount)} بتاريخ ${formatDate(topup.date)} للوحدة ${topup.unit?.code ?? "غير معروف"}.`
+      }
+    : {
+        en: unit
+          ? `No electricity top-ups recorded yet for unit ${unit.code}.`
+          : "No electricity top-ups recorded yet for this project.",
+        ar: unit
+          ? `لا توجد شحنات كهرباء مسجلة للوحدة ${unit.code}.`
+          : "لا توجد شحنات كهرباء مسجلة لهذا المشروع."
+      }
+
+  const suggestions: Suggestion[] = topup
+    ? [
+        {
+          title: "عرض آخر 5 شحنات",
+          prompt: "هات آخر خمس شحنات كهرباء للمشروع نفسه.",
+          data: {
+            projectId,
+            limit: 5
+          }
+        },
+        {
+          title: "إجمالي مصاريف الكهرباء",
+          prompt: "حاسبني إجمالي مصاريف الكهرباء للمشروع ده.",
+          data: {
+            projectId
+          }
+        }
+      ]
+    : [
+        {
+          title: "تسجيل شحن كهرباء",
+          prompt: "سجل شحن كهرباء جديد للمشروع وحدد القيمة والتاريخ.",
+          data: {
+            projectId,
+            unitCode
+          }
+        }
+      ]
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      projectId,
+      meta: {
+        unitCode: unit?.code ?? topup?.unit?.code ?? null
+      },
+      data: {
+        topup
+      },
+      humanReadable,
+      suggestions
+    }
+  }
+}
+
 const actionHandlers: Record<AllowedAction, GenericActionHandler> = {
   CREATE_OPERATIONAL_EXPENSE: handleCreateOperationalExpense as GenericActionHandler,
   GET_RESIDENT_PHONE: handleResidentLookup as GenericActionHandler,
-  LIST_PROJECT_TICKETS: handleTicketSummary as GenericActionHandler
+  LIST_PROJECT_TICKETS: handleTicketSummary as GenericActionHandler,
+  LIST_PROJECT_UNITS: handleProjectUnitsList as GenericActionHandler,
+  LIST_UNIT_EXPENSES: handleUnitExpensesList as GenericActionHandler,
+  GET_LAST_ELECTRICITY_TOPUP: handleLastElectricityTopup as GenericActionHandler
 }
 
-const EVENT_TYPES: Record<AllowedAction, "PM_OPERATIONAL_EXPENSE_CREATED" | "PM_RESIDENT_LOOKUP" | "PM_TICKETS_SUMMARY"> = {
+const EVENT_TYPES: Record<
+  AllowedAction,
+  | "PM_OPERATIONAL_EXPENSE_CREATED"
+  | "PM_RESIDENT_LOOKUP"
+  | "PM_TICKETS_SUMMARY"
+  | "PM_PROJECT_UNITS_LISTED"
+  | "PM_UNIT_EXPENSES_LISTED"
+  | "PM_ELECTRICITY_TOPUP_LOOKUP"
+> = {
   CREATE_OPERATIONAL_EXPENSE: "PM_OPERATIONAL_EXPENSE_CREATED",
   GET_RESIDENT_PHONE: "PM_RESIDENT_LOOKUP",
-  LIST_PROJECT_TICKETS: "PM_TICKETS_SUMMARY"
+  LIST_PROJECT_TICKETS: "PM_TICKETS_SUMMARY",
+  LIST_PROJECT_UNITS: "PM_PROJECT_UNITS_LISTED",
+  LIST_UNIT_EXPENSES: "PM_UNIT_EXPENSES_LISTED",
+  GET_LAST_ELECTRICITY_TOPUP: "PM_ELECTRICITY_TOPUP_LOOKUP"
 }
 
 export async function POST(req: NextRequest) {
