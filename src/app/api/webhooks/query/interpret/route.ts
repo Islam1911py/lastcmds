@@ -9,6 +9,22 @@ const TICKET_KEYWORDS = [
   "شكايه",
   "تذكرة",
   "تذاكر",
+  "بلاغ",
+  "بلاغات",
+  "مشكلة",
+  "مشاكل",
+  "اشتكى",
+  "اشتكوا",
+  "صيانة",
+  "maintenance",
+  "issue",
+  "problem",
+  "تسريب",
+  "leak",
+  "سباكة",
+  "plumbing",
+  "كهرباء",
+  "electricity",
   "ticket",
   "complaint"
 ]
@@ -22,7 +38,11 @@ const EXPENSE_KEYWORDS = [
   "electric",
   "كهرب",
   "فاتورة",
-  "فواتير"
+  "فواتير",
+  "تكلفة",
+  "ميزانية",
+  "budget",
+  "cost"
 ]
 
 const ACCOUNTING_KEYWORDS = [
@@ -32,7 +52,14 @@ const ACCOUNTING_KEYWORDS = [
   "invoice",
   "فواتير",
   "pending",
-  "محاسبه"
+  "محاسبه",
+  "مدفوعات",
+  "balance",
+  "رصيد",
+  "متأخرات",
+  "تحصيلات",
+  "debt",
+  "collections"
 ]
 
 const PROJECT_SUMMARY_KEYWORDS = [
@@ -41,7 +68,83 @@ const PROJECT_SUMMARY_KEYWORDS = [
   "overview",
   "حالة",
   "status",
-  "تفاصيل المشروع"
+  "تفاصيل المشروع",
+  "تفاصيل",
+  "بيانات",
+  "dashboard",
+  "report",
+  "إحصائيات",
+  "احصائية",
+  "اخبار"
+]
+
+const RESIDENT_KEYWORDS = [
+  "ساكن",
+  "سكان",
+  "المقيم",
+  "المقيمين",
+  "residents",
+  "resident",
+  "ساكنين",
+  "عدد السكان",
+  "عدد الساكن",
+  "قائمة السكان"
+]
+
+const RESIDENT_CONTACT_KEYWORDS = [
+  "رقم",
+  "رقمها",
+  "رقمه",
+  "رقمها",
+  "تليفون",
+  "تلفون",
+  "تليفونه",
+  "اتصال",
+  "اتصل",
+  "واتساب",
+  "whatsapp",
+  "contact",
+  "phone"
+]
+
+const PARAM_DISPLAY_LABEL: Record<string, string> = {
+  senderPhone: "رقم واتساب المدير",
+  projectId: "معرف المشروع",
+  unitCode: "كود الوحدة",
+  residentName: "اسم الساكن",
+  limit: "الحد الأقصى",
+  statuses: "حالات التذاكر"
+}
+
+const TICKET_TOPIC_KEYWORDS: Array<{ label: string; tokens: string[] }> = [
+  {
+    label: "السباكة",
+    tokens: ["سباكة", "plumbing", "مواسير", "تسريب", "leak", "صرف صحي"]
+  },
+  {
+    label: "الكهرباء",
+    tokens: ["كهرب", "كهرباء", "electric", "electricity", "قاطع", "نور"]
+  },
+  {
+    label: "المياه",
+    tokens: ["مياه", "ماء", "water", "خزان", "ضعف المياه"]
+  },
+  {
+    label: "النظافة",
+    tokens: ["نظافة", "clean", "قمامة", "زبالة"]
+  },
+  {
+    label: "الأمن",
+    tokens: ["امن", "أمن", "security", "حراسة", "بوابة"]
+  },
+  {
+    label: "الصيانة العامة",
+    tokens: ["صيانة", "maintenance", "تصليح", "fix"]
+  },
+  {
+    label: "المصاعد",
+    tokens: ["مصعد", "اسنصير", "elevator", "lift"]
+  }
 ]
 
 const RANGE_KEYWORDS: Record<string, string[]> = {
@@ -59,11 +162,19 @@ const STATUS_KEYWORDS: Record<string, string[]> = {
 
 type Role = "ADMIN" | "ACCOUNTANT" | "PROJECT_MANAGER"
 
+type Suggestion = {
+  title: string
+  prompt: string
+  data?: Record<string, unknown>
+}
+
 type InterpretationCandidate = {
   id: string
   confidence: number
   role: Role
   description: string
+  missingParameters: string[]
+  searchTerms: string[]
   http: {
     method: "GET" | "POST"
     endpoint: string
@@ -86,6 +197,19 @@ function normalize(text: string) {
 function detectKeywords(question: string, keywords: string[]) {
   const normalizedQuestion = normalize(question)
   return keywords.filter((keyword) => normalizedQuestion.includes(keyword))
+}
+
+function detectTicketTopics(question: string) {
+  const normalizedQuestion = normalize(question)
+  const topics = new Set<string>()
+
+  for (const topic of TICKET_TOPIC_KEYWORDS) {
+    if (topic.tokens.some((token) => normalizedQuestion.includes(normalize(token)))) {
+      topics.add(topic.label)
+    }
+  }
+
+  return Array.from(topics)
 }
 
 function detectRange(question: string) {
@@ -119,6 +243,15 @@ function detectLimit(question: string, fallback = 5) {
     return fallback
   }
   return Math.min(Math.trunc(numeric), 25)
+}
+
+function detectUnitCode(question: string) {
+  const unitRegex = /(?:كود\s+الوحدة|وحدة|شقة|unit|flat)\s+([A-Za-z0-9\-_/]+)/i
+  const match = question.match(unitRegex)
+  if (match && match[1]) {
+    return match[1].trim()
+  }
+  return null
 }
 
 async function matchProject(question: string, explicitProjectName?: string | null) {
@@ -158,15 +291,20 @@ function buildTicketCandidate(options: {
   limit: number
   question: string
   matchedKeywords: string[]
+  topics: string[]
 }): InterpretationCandidate {
   const requiredParameters: string[] = ["senderPhone"]
+  const missingParameters: string[] = ["senderPhone"]
   const optionalParameters: string[] = ["statuses", "limit"]
   if (!options.projectId) {
     requiredParameters.push("projectId")
+    missingParameters.push("projectId")
   }
   if (options.range) {
     optionalParameters.push("range")
   }
+
+  const searchTerms = Array.from(new Set([...options.matchedKeywords, ...options.topics]))
 
   const payload: Record<string, unknown> = {
     action: "LIST_PROJECT_TICKETS",
@@ -180,9 +318,14 @@ function buildTicketCandidate(options: {
 
   return {
     id: "project-manager-list-tickets",
-    confidence: Math.min(0.9, 0.55 + (options.projectId ? 0.2 : 0) + options.matchedKeywords.length * 0.05),
+    confidence: Math.min(
+      0.92,
+      0.55 + (options.projectId ? 0.2 : 0) + options.matchedKeywords.length * 0.05 + options.topics.length * 0.03
+    ),
     role: options.role,
     description: "قائمة التذاكر للمشروع المحدد مع دعم تحديد الحالة والعدد",
+    missingParameters,
+    searchTerms,
     http: {
       method: "POST",
       endpoint: "/api/webhooks/project-managers",
@@ -194,10 +337,15 @@ function buildTicketCandidate(options: {
       options.range
         ? `فلترة النتائج زمنيًا بحسب ${options.range}`
         : "ترتيب التذاكر تنازليًا حسب createdAt",
-      "عرض رقم التذكرة والعنوان والحالة والساكن إن وجد"
+      "عرض رقم التذكرة والعنوان والحالة والساكن إن وجد",
+      options.topics.length > 0
+        ? `تركيز التحليل على التذاكر المتعلقة بـ ${options.topics.join(" و ")}`
+        : "تحديد التذاكر الأكثر صلة بالوصف الوارد في السؤال"
     ],
     humanReadable: {
-      ar: `استخدم إجراء LIST_PROJECT_TICKETS لاسترجاع أحدث التذاكر للمشروع${options.projectName ? ` ${options.projectName}` : ""}.`
+      ar: `استخدم إجراء LIST_PROJECT_TICKETS لاسترجاع أحدث التذاكر للمشروع${options.projectName ? ` ${options.projectName}` : ""}${
+        options.topics.length > 0 ? ` مع التركيز على ${options.topics.join(" و ")}` : ""
+      }.`
     }
   }
 }
@@ -212,8 +360,10 @@ function buildExpenseCandidate(options: {
 }) {
   const requiredParameters: string[] = []
   const optionalParameters: string[] = ["range", "unit", "date"]
+  const missingParameters: string[] = []
   if (!options.projectId) {
     requiredParameters.push("projectId")
+    missingParameters.push("projectId")
   }
 
   const query: Record<string, string | null> = {
@@ -226,12 +376,15 @@ function buildExpenseCandidate(options: {
   }
 
   const expenseKeywords = options.matchedKeywords.filter((keyword) => keyword.includes("كهرب"))
+  const searchTerms = Array.from(new Set(options.matchedKeywords))
 
   return {
     id: "project-manager-last-expense",
     confidence: Math.min(0.85, 0.5 + (options.projectId ? 0.25 : 0) + (options.range ? 0.1 : 0)),
     role: options.role,
     description: "استعلام عن آخر المصروفات للمشروع مع إمكانية تصفية إضافية",
+    missingParameters,
+    searchTerms,
     http: {
       method: "GET",
       endpoint: "/api/webhooks/query",
@@ -257,6 +410,8 @@ function buildAccountingCandidate(role: Role): InterpretationCandidate {
     confidence: 0.6,
     role,
     description: "لوحة المحاسب: فواتير، مدفوعات، ملاحظات معلقة",
+    missingParameters: [],
+    searchTerms: ["محاسبة", "فواتير", "مدفوعات"],
     http: {
       method: "GET",
       endpoint: "/api/webhooks/query",
@@ -278,6 +433,8 @@ function buildAdminCandidate(role: Role): InterpretationCandidate {
     confidence: 0.55,
     role,
     description: "ملخص شامل للمشروعات والوحدات والسكان والتذاكر",
+    missingParameters: [],
+    searchTerms: ["ملخص", "dashboard"],
     http: {
       method: "GET",
       endpoint: "/api/webhooks/query",
@@ -290,6 +447,101 @@ function buildAdminCandidate(role: Role): InterpretationCandidate {
     postProcess: ["تحديد الأرقام المهمة للطلب الإداري", "استخراج أي عناصر تحتاج متابعة"],
     humanReadable: {
       ar: "استخدم type=ALL_DATA للحصول على نظرة عامة على المنصة ثم استخرج الجزء المطلوب من البيانات." }
+  }
+}
+
+function buildProjectDataCandidate(options: {
+  role: Role
+  projectId?: string | null
+  projectName?: string | null
+  question: string
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  const requiredParameters: string[] = []
+  const optionalParameters: string[] = ["senderPhone"]
+
+  if (!options.projectId) {
+    requiredParameters.push("projectId")
+  }
+
+  const missingParameters: string[] = []
+  if (!options.projectId) {
+    missingParameters.push("projectId")
+  }
+
+  return {
+    id: "project-data-summary",
+    confidence: Math.min(0.88, 0.55 + (options.projectId ? 0.25 : 0) + options.matchedKeywords.length * 0.05),
+    role: options.role,
+    description: "ملخص المشروع مع عدد الوحدات والسكان والتذاكر",
+    missingParameters,
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "GET",
+      endpoint: "/api/webhooks/query",
+      query: {
+        type: "PROJECT_DATA",
+        projectId: options.projectId ?? "{{projectId}}"
+      }
+    },
+    requiredParameters,
+    optionalParameters,
+    postProcess: [
+      "اقرأ الحقل summary.totalResidents للإجابة عن عدد السكان",
+      "استخدم المصفوفة residents لعرض الأسماء والوحدات عند الحاجة",
+      "انقل المعلومات المطلوبة باللغة العربية مع ذكر اسم المشروع إن توفر"
+    ],
+    humanReadable: {
+      ar: `استخدم استعلام PROJECT_DATA للحصول على عدد السكان والوحدات${options.projectName ? ` للمشروع ${options.projectName}` : ""}.`
+    }
+  }
+}
+
+function buildResidentPhoneCandidate(options: {
+  role: Role
+  projectId?: string | null
+  projectName?: string | null
+  unitCode?: string | null
+}): InterpretationCandidate {
+  const requiredParameters: string[] = ["senderPhone", "projectId", "unitCode"]
+  const missingParameters = requiredParameters.filter((param) => {
+    if (param === "projectId") {
+      return !options.projectId
+    }
+    if (param === "unitCode") {
+      return !options.unitCode
+    }
+    return true
+  })
+
+  return {
+    id: "project-manager-resident-phone",
+    confidence: Math.min(0.88, 0.6 + (options.projectId ? 0.2 : 0)),
+    role: options.role,
+    description: "جلب رقم تواصل الساكن لوحدة محددة داخل المشروع",
+    missingParameters,
+    searchTerms: options.unitCode ? [options.unitCode] : [],
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/project-managers",
+      payload: {
+        action: "GET_RESIDENT_PHONE",
+        senderPhone: "{{pmPhone}}",
+        payload: {
+          projectId: options.projectId ?? "{{projectId}}",
+          unitCode: options.unitCode ?? "{{unitCode}}"
+        }
+      }
+    },
+    requiredParameters,
+    optionalParameters: ["residentName", "limit"],
+    postProcess: [
+      "تحقق أن الاستجابة تحتوي على residents ثم اعرض الاسم والرقم",
+      "أخبر المستخدم إذا تمت إعادة أكثر من ساكن واطلب تحديد الاسم عند الحاجة"
+    ],
+    humanReadable: {
+      ar: `استخدم إجراء GET_RESIDENT_PHONE لاسترجاع رقم الساكن للوحدة المطلوبة${options.projectName ? ` داخل ${options.projectName}` : ""}.`
+    }
   }
 }
 
@@ -328,12 +580,21 @@ export async function POST(req: NextRequest) {
     const matchedExpenses = detectKeywords(normalizedQuestion, EXPENSE_KEYWORDS)
     const matchedAccounting = detectKeywords(normalizedQuestion, ACCOUNTING_KEYWORDS)
     const matchedSummary = detectKeywords(normalizedQuestion, PROJECT_SUMMARY_KEYWORDS)
+    const matchedResidents = detectKeywords(normalizedQuestion, RESIDENT_KEYWORDS)
+    const matchedResidentContact = detectKeywords(normalizedQuestion, RESIDENT_CONTACT_KEYWORDS)
+    const mentionsUnit =
+      normalizedQuestion.includes("وحدة") ||
+      normalizedQuestion.includes("شقة") ||
+      normalizedQuestion.includes("unit") ||
+      normalizedQuestion.includes("flat")
 
     const range = detectRange(normalizedQuestion)
     const statuses = detectStatuses(normalizedQuestion)
     const limit = detectLimit(normalizedQuestion)
+    const unitCode = detectUnitCode(question)
 
     const projectMatch = await matchProject(question, explicitProjectName)
+    const ticketTopics = detectTicketTopics(question)
 
     const candidates: InterpretationCandidate[] = []
 
@@ -347,7 +608,8 @@ export async function POST(req: NextRequest) {
           range,
           limit,
           question,
-          matchedKeywords: matchedTickets
+          matchedKeywords: matchedTickets,
+          topics: ticketTopics
         })
       )
     }
@@ -373,9 +635,57 @@ export async function POST(req: NextRequest) {
       candidates.push(buildAdminCandidate(role))
     }
 
+    if (matchedResidents.length > 0 || normalizedQuestion.includes("resident")) {
+      candidates.push(
+        buildProjectDataCandidate({
+          role,
+          projectId: projectMatch?.id ?? null,
+          projectName: projectMatch?.name ?? null,
+          question,
+          matchedKeywords: matchedResidents
+        })
+      )
+    }
+
+    if (matchedResidentContact.length > 0 && (matchedResidents.length > 0 || mentionsUnit)) {
+      candidates.push(
+        buildResidentPhoneCandidate({
+          role,
+          projectId: projectMatch?.id ?? null,
+          projectName: projectMatch?.name ?? null,
+          unitCode
+        })
+      )
+    }
+
     const sortedCandidates = candidates.sort((a, b) => b.confidence - a.confidence)
 
     const success = sortedCandidates.length > 0
+
+    const suggestions: Suggestion[] = success
+      ? []
+      : [
+          {
+            title: "تحديد نوع البيانات",
+            prompt: "هل السؤال متعلق بالمصروفات، التذاكر، أو ملخص إداري؟"
+          }
+        ]
+
+    if (success) {
+      const topCandidate = sortedCandidates[0]
+      if (topCandidate.missingParameters.length > 0) {
+        const missingLabels = topCandidate.missingParameters.map(
+          (param) => PARAM_DISPLAY_LABEL[param] ?? param
+        )
+        suggestions.push({
+          title: "تجهيز البيانات المطلوبة",
+          prompt: `أرسل ${missingLabels.join(" و ")} لإكمال الطلب الحالي.`,
+          data: {
+            missingParameters: topCandidate.missingParameters
+          }
+        })
+      }
+    }
 
     const humanReadable = success
       ? {
@@ -395,14 +705,7 @@ export async function POST(req: NextRequest) {
       limit,
       candidates: sortedCandidates,
       humanReadable,
-      suggestions: success
-        ? []
-        : [
-            {
-              title: "تحديد نوع البيانات",
-              prompt: "هل السؤال متعلق بالمصروفات، التذاكر، أو ملخص إداري؟"
-            }
-          ]
+      suggestions
     }
 
     await logWebhookEvent(

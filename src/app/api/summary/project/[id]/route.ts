@@ -20,6 +20,7 @@ export async function GET(
     const project = await db.project.findUnique({
       where: { id },
       include: {
+        projectType: true,
         operationalUnits: {
           include: {
             residents: true,
@@ -184,7 +185,7 @@ export async function GET(
       project: {
         id: project.id,
         name: project.name,
-        type: project.type,
+        type: project.projectType?.name ?? null,
         isActive: project.isActive,
         unitCount: units.length
       },

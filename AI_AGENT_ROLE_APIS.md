@@ -89,6 +89,17 @@ Direct listing endpoint when the agent already knows exact filters (mirrors the 
 
 Use when operating with service credentials instead of impersonating a manager phone.
 
+### 4. GET `/api/webhooks/query?type=PROJECT_DATA`
+Pulls a project dashboard summary: units, residents, open tickets, technicians, and staff.
+
+| Query Parameter | Notes |
+|-----------------|-------|
+| `type=PROJECT_DATA` | Required. |
+| `projectId` | Required unless the API key is project-scoped. |
+| `senderPhone` | Optional but helpful to assert manager permissions. |
+
+`data.summary.totalResidents` يحتوي على عدد السكان، و`data.residents[]` تضم التفاصيل (الاسم، الهاتف، الوحدة) التي يمكنك عرضها للمستخدم.
+
 ---
 
 ## 📊 Accountant Webhooks

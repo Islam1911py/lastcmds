@@ -48,6 +48,8 @@
       "confidence": 0.75,
       "role": "PROJECT_MANAGER",
       "description": "استعلام عن آخر المصروفات للمشروع مع إمكانية تصفية إضافية",
+      "missingParameters": [],
+      "searchTerms": ["مصروف", "كهرب"],
       "http": {
         "method": "GET",
         "endpoint": "/api/webhooks/query",
@@ -78,19 +80,26 @@
 ### Candidate Object
 - `confidence`: 0 → 1 score used to sort suggestions.
 - `http`: Ready-to-use instruction for the n8n HTTP Request node (method, endpoint, query/payload).
+- `missingParameters`: Required fields still unresolved (placeholders). Prompt the user for these immediately.
+- `searchTerms`: كلمات مفتاحية مقترحة لإعادة استخدامها في البحث أو الفلترة داخل الـworkflow.
 - `requiredParameters`: Placeholders that must be supplied before executing.
 - `optionalParameters`: Helpful extras if data exists.
 - `postProcess`: Steps the AI should do after receiving the downstream webhook response.
+
+`suggestions` may include a structured `data.missingParameters` array so the workflow can route follow-up prompts automatically.
 
 When `success` is `false`, the array is empty and `suggestions` contains clarifying prompts for the agent to ask the user.
 
 ---
 
 ## 🧠 Detection Heuristics (v1)
-- **Tickets:** كلمات مثل "شكوى", "تذكرة", "ticket" → uses `/api/webhooks/project-managers` with `LIST_PROJECT_TICKETS`.
+- **Tickets:** كلمات مثل "شكوى", "بلاغ", "مشكلة", "صيانة", "سباكة", "كهرباء" → يستخدم `/api/webhooks/project-managers` مع `LIST_PROJECT_TICKETS`.
+- إذا التقط السؤال كلمات موضوعية (سباكة، كهرباء، نظافة...) سيضيف `postProcess` خطوة للتركيز على هذا النوع من التذاكر ويملأ `searchTerms` بالقيم نفسها لتسهيل الفلترة.
 - **Expenses:** "مصروف", "كهرب", "فاتورة" → uses `/api/webhooks/query?type=LAST_EXPENSE` with range filters.
 - **Accounting:** Triggered for accountant role or words like "تحصيل", "دفعة" → `/api/webhooks/query?type=ACCOUNTING_DATA`.
 - **Admin Summary:** For admin role or words like "ملخص", "status" → `/api/webhooks/query?type=ALL_DATA`.
+- **Residents:** كلمات مثل "ساكن", "سكان", "residents" → `/api/webhooks/query?type=PROJECT_DATA` للحصول على عدد السكان وقائمة الأسماء.
+- **Resident Contact:** إذا ظهر طلب رقم/تواصل الساكن مع ذكر الوحدة → `/api/webhooks/project-managers` مع `GET_RESIDENT_PHONE` ويطلب `unitCode` (يحاول استخراج الكود آليًا من النص مثل "شقة A3").
 - **Range:** Detects today/week/month/overall keywords.
 - **Statuses:** Maps "جديد", "مغلق" etc. to ticket statuses.
 - **Limit:** Picks first number in the text (clamped to 25) for ticket pagination.
@@ -100,8 +109,8 @@ When `success` is `false`, the array is empty and `suggestions` contains clarify
 
 ## 🤖 n8n Flow Tips
 1. **Interpret:** Call `/api/webhooks/query/interpret` right after receiving the user message.
-2. **Pick Candidate:** Use the highest-confidence candidate. If confidence < 0.55, ask follow-up using `suggestions`.
-3. **Fill Parameters:** Replace placeholders (e.g. `{{projectId}}`, `{{pmPhone}}`) before the HTTP Request node.
+2. **Pick Candidate:** Use the highest-confidence candidate. If confidence < 0.55, or `suggestions` mention missing fields, ask the user for the required info first.
+3. **Fill Parameters:** Replace placeholders (e.g. `{{projectId}}`, `{{pmPhone}}`). عندما يكتشف المفسر كود الوحدة من السؤال سيتم تضمينه تلقائيًا، وإلا سيظهر في `missingParameters`.
 4. **Execute HTTP:** Perform the downstream webhook call exactly as defined in `http`.
 5. **Post-Process:** Apply the listed steps to craft the final AI response (sums, filtering, etc.).
 6. **Audit:** Interpretation attempts are logged with event `QUERY_INTERPRETED` for debugging.
