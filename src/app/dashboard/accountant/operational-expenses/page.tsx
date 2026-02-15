@@ -986,10 +986,13 @@ export default function OperationalExpensesPage() {
                       ? note.convertedAt || note.convertedToExpense?.recordedAt || note.createdAt
                       : note.createdAt
 
+                    const unitName = note.unit?.name ?? "وحدة غير معروفة"
+                    const unitCode = note.unit?.code ?? "—"
+
                     return (
                       <TableRow key={note.id}>
                         <TableCell className="font-medium">
-                          {note.unit.name} ({note.unit.code})
+                          {unitName} ({unitCode})
                         </TableCell>
                         <TableCell>{note.description}</TableCell>
                         <TableCell className="font-bold">{note.amount.toFixed(2)} جنيه</TableCell>

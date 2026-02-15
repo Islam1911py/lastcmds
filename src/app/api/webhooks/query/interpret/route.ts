@@ -62,6 +62,103 @@ const ACCOUNTING_KEYWORDS = [
   "collections"
 ]
 
+const PM_ADVANCE_KEYWORDS = [
+  "عهدة",
+  "عهد",
+  "pm advance",
+  "مقدم",
+  "سلفة مدير",
+  "pm money"
+]
+
+const STAFF_ADVANCE_KEYWORDS = [
+  "سلفة",
+  "سلف",
+  "staff advance",
+  "سلفه",
+  "advance موظف",
+  "موظف سلف"
+]
+
+const ACCOUNTING_NOTE_ACTION_KEYWORDS = [
+  "حول القيد",
+  "سجل القيد",
+  "سجل الملاحظه",
+  "convert note",
+  "record note",
+  "تحويل القيد",
+  "اعتمد القيد",
+  "ملاحظه محاسبيه"
+]
+
+const INVOICE_PAYMENT_KEYWORDS = [
+  "سدد",
+  "اسدد",
+  "ادفع",
+  "دفع",
+  "تحصيل",
+  "pay invoice",
+  "invoice payment",
+  "سداده",
+  "سداد"
+]
+
+const PAYROLL_KEYWORDS = [
+  "مرتب",
+  "مرتبات",
+  "رواتب",
+  "كشف",
+  "payroll",
+  "salary sheet"
+]
+
+const CREATE_VERB_KEYWORDS = [
+  "سجل",
+  "create",
+  "اعمل",
+  "اضيف",
+  "ضيف",
+  "جهز",
+  "prepare",
+  "generate",
+  "صرف",
+  "اعتمد"
+]
+
+const UPDATE_VERB_KEYWORDS = [
+  "عدل",
+  "عدله",
+  "عدلها",
+  "update",
+  "حدث",
+  "تعديل",
+  "غير",
+  "زود",
+  "قلل"
+]
+
+const DELETE_VERB_KEYWORDS = [
+  "احذف",
+  "احزف",
+  "امسح",
+  "ازاله",
+  "شيل",
+  "remove",
+  "delete",
+  "cancel",
+  "الغ"
+]
+
+const PAY_VERB_KEYWORDS = [
+  "ادفع",
+  "سدد",
+  "pay",
+  "settle",
+  "صرف",
+  "صرفها",
+  "صرفوا"
+]
+
 const PROJECT_SUMMARY_KEYWORDS = [
   "ملخص",
   "وضع",
@@ -191,12 +288,19 @@ type InterpretationCandidate = {
 }
 
 function normalize(text: string) {
-  return text.trim().toLowerCase()
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/أ|إ|آ/g, "ا")
+    .replace(/ى/g, "ي")
+    .replace(/ة/g, "ه")
+    .replace(/ؤ/g, "و")
+    .replace(/ئ/g, "ي")
 }
 
 function detectKeywords(question: string, keywords: string[]) {
   const normalizedQuestion = normalize(question)
-  return keywords.filter((keyword) => normalizedQuestion.includes(keyword))
+  return keywords.filter((keyword) => normalizedQuestion.includes(normalize(keyword)))
 }
 
 function detectTicketTopics(question: string) {
@@ -545,6 +649,303 @@ function buildResidentPhoneCandidate(options: {
   }
 }
 
+function buildCreatePmAdvanceCandidate(options: {
+  role: Role
+  projectId?: string | null
+  projectName?: string | null
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  const payload: Record<string, unknown> = {
+    action: "CREATE_PM_ADVANCE",
+    senderPhone: "{{accountantPhone}}",
+    payload: {
+      staffId: "{{staffId}}",
+      amount: "{{amount}}",
+      ...(options.projectId ? { projectId: options.projectId } : {})
+    }
+  }
+
+  if (!options.projectId) {
+    ;(payload.payload as Record<string, unknown>).projectId = "{{projectId}}"
+  }
+
+  return {
+    id: "accountant-create-pm-advance",
+    confidence: Math.min(0.85, 0.6 + options.matchedKeywords.length * 0.05 + (options.projectId ? 0.1 : 0)),
+    role: options.role,
+    description: "تسجيل عهدة جديدة لمدير المشروع",
+    missingParameters: ["staffId", "amount"],
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload
+    },
+    requiredParameters: ["staffId", "amount"],
+    optionalParameters: ["projectId", "notes"],
+    postProcess: [
+      "تأكد من صحة staffId للموظف الذي يستلم العهدة",
+      options.projectName
+        ? `استخدم projectId الخاص بالمشروع ${options.projectName}`
+        : "حدد projectId إذا كانت العهدة مرتبطة بمشروع معين",
+      "يمكن إضافة notes توضح السبب أو الغرض في الحقل payload.notes"
+    ],
+    humanReadable: {
+      ar: `استدعي إجراء CREATE_PM_ADVANCE لتسجيل العهدة${options.projectName ? ` على مشروع ${options.projectName}` : ""}.`
+    }
+  }
+}
+
+function buildCreateStaffAdvanceCandidate(options: {
+  role: Role
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  return {
+    id: "accountant-create-staff-advance",
+    confidence: Math.min(0.82, 0.58 + options.matchedKeywords.length * 0.05),
+    role: options.role,
+    description: "تسجيل سلفة جديدة لأحد الموظفين",
+    missingParameters: ["staffId", "amount"],
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload: {
+        action: "CREATE_STAFF_ADVANCE",
+        senderPhone: "{{accountantPhone}}",
+        payload: {
+          staffId: "{{staffId}}",
+          amount: "{{amount}}",
+          note: "{{note}}"
+        }
+      }
+    },
+    requiredParameters: ["staffId", "amount"],
+    optionalParameters: ["note"],
+    postProcess: [
+      "استخدم staffId للموظف المستفيد",
+      "حدد amount كرقم موجب",
+      "يمكن إضافة ملاحظة إضافية في الحقل note"
+    ],
+    humanReadable: {
+      ar: "استدعي CREATE_STAFF_ADVANCE مع staffId والمبلغ لإضافة السلفة."
+    }
+  }
+}
+
+function buildUpdateStaffAdvanceCandidate(options: {
+  role: Role
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  return {
+    id: "accountant-update-staff-advance",
+    confidence: Math.min(0.8, 0.55 + options.matchedKeywords.length * 0.04),
+    role: options.role,
+    description: "تعديل بيانات سلفة موظف قائمة",
+    missingParameters: ["advanceId"],
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload: {
+        action: "UPDATE_STAFF_ADVANCE",
+        senderPhone: "{{accountantPhone}}",
+        payload: {
+          advanceId: "{{advanceId}}",
+          amount: "{{amount}}",
+          note: "{{note}}"
+        }
+      }
+    },
+    requiredParameters: ["advanceId"],
+    optionalParameters: ["amount", "note"],
+    postProcess: [
+      "تأكد من توفير advanceId الصحيح للسلفة",
+      "حدث amount أو note أو كلاهما قبل الإرسال",
+      "إذا لم يتغير أي حقل سيقوم النظام برفض الطلب"
+    ],
+    humanReadable: {
+      ar: "استخدم UPDATE_STAFF_ADVANCE لتعديل السلفة، مع تزويد advanceId وإدخال القيم الجديدة في amount أو note."
+    }
+  }
+}
+
+function buildDeleteStaffAdvanceCandidate(options: {
+  role: Role
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  return {
+    id: "accountant-delete-staff-advance",
+    confidence: Math.min(0.78, 0.54 + options.matchedKeywords.length * 0.04),
+    role: options.role,
+    description: "حذف سلفة موظف طالما ما زالت معلقة",
+    missingParameters: ["advanceId"],
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload: {
+        action: "DELETE_STAFF_ADVANCE",
+        senderPhone: "{{accountantPhone}}",
+        payload: {
+          advanceId: "{{advanceId}}"
+        }
+      }
+    },
+    requiredParameters: ["advanceId"],
+    optionalParameters: [],
+    postProcess: [
+      "تأكد أن السلفة بحالة PENDING قبل الحذف",
+      "أبلغ المستخدم إذا كانت السلفة مخصومة فلا يمكن حذفها"
+    ],
+    humanReadable: {
+      ar: "استدعي DELETE_STAFF_ADVANCE مع advanceId المناسب لحذف السلفة المعلقة."
+    }
+  }
+}
+
+function buildRecordAccountingNoteCandidate(options: {
+  role: Role
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  return {
+    id: "accountant-record-note",
+    confidence: Math.min(0.83, 0.58 + options.matchedKeywords.length * 0.05),
+    role: options.role,
+    description: "تحويل القيد المحاسبي إلى مصروف وإصدار فاتورة مطالبة",
+    missingParameters: ["noteId"],
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload: {
+        action: "RECORD_ACCOUNTING_NOTE",
+        senderPhone: "{{accountantPhone}}",
+        payload: {
+          noteId: "{{noteId}}",
+          sourceType: "{{sourceType}}",
+          pmAdvanceId: "{{pmAdvanceId}}"
+        }
+      }
+    },
+    requiredParameters: ["noteId"],
+    optionalParameters: ["sourceType", "pmAdvanceId"],
+    postProcess: [
+      "أدخل noteId للقيد المراد تحويله",
+      "إذا كان التمويل من عهدة مدير استخدم sourceType=PM_ADVANCE مع pmAdvanceId المناسب",
+      "بعد التحويل اعرض رقم المطالبة الناتج للمستخدم"
+    ],
+    humanReadable: {
+      ar: "استخدم RECORD_ACCOUNTING_NOTE لتحويل القيد إلى مصروف مع إمكانية ربطه بعهدة مدير."
+    }
+  }
+}
+
+function buildPayInvoiceCandidate(options: {
+  role: Role
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  return {
+    id: "accountant-pay-invoice",
+    confidence: Math.min(0.84, 0.6 + options.matchedKeywords.length * 0.05),
+    role: options.role,
+    description: "تسجيل دفعة على فاتورة مالك أو مطالبة",
+    missingParameters: ["invoiceId"],
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload: {
+        action: "PAY_INVOICE",
+        senderPhone: "{{accountantPhone}}",
+        payload: {
+          invoiceId: "{{invoiceId}}",
+          amount: "{{amount}}",
+          action: "{{paymentAction}}"
+        }
+      }
+    },
+    requiredParameters: ["invoiceId"],
+    optionalParameters: ["amount", "paymentAction"],
+    postProcess: [
+      "حدد invoiceId الصحيح",
+      "إذا كانت الدفعة جزئية أرسل amount، وإلا استخدم paymentAction=mark-paid لتسوية الرصيد",
+      "راجع الرصيد المتبقي بعد الدفع"
+    ],
+    humanReadable: {
+      ar: "استدعي PAY_INVOICE مع invoiceId، ويمكن تمرير amount أو استخدام mark-paid لتسوية كاملة."
+    }
+  }
+}
+
+function buildCreatePayrollCandidate(options: {
+  role: Role
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  return {
+    id: "accountant-create-payroll",
+    confidence: Math.min(0.82, 0.57 + options.matchedKeywords.length * 0.05),
+    role: options.role,
+    description: "إنشاء كشف رواتب لشهر محدد",
+    missingParameters: ["month"],
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload: {
+        action: "CREATE_PAYROLL",
+        senderPhone: "{{accountantPhone}}",
+        payload: {
+          month: "{{month}}"
+        }
+      }
+    },
+    requiredParameters: ["month"],
+    optionalParameters: [],
+    postProcess: [
+      "استخدم month بصيغة YYYY-MM",
+      "تحقق أنه لا يوجد كشف سابق لنفس الشهر قبل التنفيذ"
+    ],
+    humanReadable: {
+      ar: "استدعي CREATE_PAYROLL مع month بصيغة YYYY-MM لإنشاء كشف الرواتب."
+    }
+  }
+}
+
+function buildPayPayrollCandidate(options: {
+  role: Role
+  matchedKeywords: string[]
+}): InterpretationCandidate {
+  return {
+    id: "accountant-pay-payroll",
+    confidence: Math.min(0.83, 0.58 + options.matchedKeywords.length * 0.05),
+    role: options.role,
+    description: "تأكيد صرف كشف الرواتب وخصم السلف المعلقة",
+    missingParameters: ["payrollId"],
+    searchTerms: Array.from(new Set(options.matchedKeywords)),
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload: {
+        action: "PAY_PAYROLL",
+        senderPhone: "{{accountantPhone}}",
+        payload: {
+          payrollId: "{{payrollId}}"
+        }
+      }
+    },
+    requiredParameters: ["payrollId"],
+    optionalParameters: [],
+    postProcess: [
+      "تأكد أن الكشف بحالة PENDING قبل الدفع",
+      "راجع السلف المعلقة المرتبطة ليتم خصمها تلقائياً"
+    ],
+    humanReadable: {
+      ar: "استدعي PAY_PAYROLL مع payrollId لتأكيد صرف الرواتب وخصم السلف."
+    }
+  }
+}
+
 export async function POST(req: NextRequest) {
   const ipAddress = req.headers.get("x-forwarded-for") || "unknown"
 
@@ -582,6 +983,15 @@ export async function POST(req: NextRequest) {
     const matchedSummary = detectKeywords(normalizedQuestion, PROJECT_SUMMARY_KEYWORDS)
     const matchedResidents = detectKeywords(normalizedQuestion, RESIDENT_KEYWORDS)
     const matchedResidentContact = detectKeywords(normalizedQuestion, RESIDENT_CONTACT_KEYWORDS)
+    const matchedPmAdvance = detectKeywords(normalizedQuestion, PM_ADVANCE_KEYWORDS)
+    const matchedStaffAdvance = detectKeywords(normalizedQuestion, STAFF_ADVANCE_KEYWORDS)
+    const matchedAccountingNoteActions = detectKeywords(normalizedQuestion, ACCOUNTING_NOTE_ACTION_KEYWORDS)
+    const matchedInvoicePayment = detectKeywords(normalizedQuestion, INVOICE_PAYMENT_KEYWORDS)
+    const matchedPayroll = detectKeywords(normalizedQuestion, PAYROLL_KEYWORDS)
+    const matchedCreateVerbs = detectKeywords(normalizedQuestion, CREATE_VERB_KEYWORDS)
+    const matchedUpdateVerbs = detectKeywords(normalizedQuestion, UPDATE_VERB_KEYWORDS)
+    const matchedDeleteVerbs = detectKeywords(normalizedQuestion, DELETE_VERB_KEYWORDS)
+    const matchedPayVerbs = detectKeywords(normalizedQuestion, PAY_VERB_KEYWORDS)
     const mentionsUnit =
       normalizedQuestion.includes("وحدة") ||
       normalizedQuestion.includes("شقة") ||
@@ -625,6 +1035,83 @@ export async function POST(req: NextRequest) {
           matchedKeywords: matchedExpenses
         })
       )
+    }
+
+    if (role === "ACCOUNTANT") {
+      if (matchedPmAdvance.length > 0) {
+        candidates.push(
+          buildCreatePmAdvanceCandidate({
+            role,
+            projectId: projectMatch?.id ?? null,
+            projectName: projectMatch?.name ?? null,
+            matchedKeywords: matchedPmAdvance
+          })
+        )
+      }
+
+      if (matchedStaffAdvance.length > 0) {
+        if (matchedDeleteVerbs.length > 0) {
+          candidates.push(
+            buildDeleteStaffAdvanceCandidate({
+              role,
+              matchedKeywords: matchedStaffAdvance.concat(matchedDeleteVerbs)
+            })
+          )
+        } else if (matchedUpdateVerbs.length > 0) {
+          candidates.push(
+            buildUpdateStaffAdvanceCandidate({
+              role,
+              matchedKeywords: matchedStaffAdvance.concat(matchedUpdateVerbs)
+            })
+          )
+        } else {
+          candidates.push(
+            buildCreateStaffAdvanceCandidate({
+              role,
+              matchedKeywords: matchedStaffAdvance
+            })
+          )
+        }
+      }
+
+      if (matchedAccountingNoteActions.length > 0) {
+        candidates.push(
+          buildRecordAccountingNoteCandidate({
+            role,
+            matchedKeywords: matchedAccountingNoteActions
+          })
+        )
+      }
+
+      if (
+        matchedInvoicePayment.length > 0 ||
+        (matchedAccounting.some((kw) => kw.includes("invoice") || kw.includes("فاتور")) && matchedPayVerbs.length > 0)
+      ) {
+        candidates.push(
+          buildPayInvoiceCandidate({
+            role,
+            matchedKeywords: Array.from(new Set([...matchedAccounting, ...matchedInvoicePayment, ...matchedPayVerbs]))
+          })
+        )
+      }
+
+      if (matchedPayroll.length > 0) {
+        if (matchedPayVerbs.length > 0) {
+          candidates.push(
+            buildPayPayrollCandidate({
+              role,
+              matchedKeywords: matchedPayroll.concat(matchedPayVerbs)
+            })
+          )
+        } else {
+          candidates.push(
+            buildCreatePayrollCandidate({
+              role,
+              matchedKeywords: matchedPayroll.concat(matchedCreateVerbs)
+            })
+          )
+        }
+      }
     }
 
     if (role === "ACCOUNTANT" || matchedAccounting.length > 0) {

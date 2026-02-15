@@ -475,101 +475,79 @@ async function handleCreateOperationalExpense(
     recordedAtDate = parsed
   }
 
-  const expense = await db.operationalExpense.create({
+  const accountingNote = await db.accountingNote.create({
     data: {
+      projectId,
       unitId: unit.id,
+      createdByUserId: manager.id,
       description: normalizedDescription,
       amount: numericAmount,
+      status: "PENDING",
       sourceType,
-      pmAdvanceId: sourceType === "PM_ADVANCE" ? connectedPmAdvanceId : null,
-      recordedByUserId: manager.id,
-      recordedAt: recordedAtDate
+      pmAdvanceId: sourceType === "PM_ADVANCE" ? connectedPmAdvanceId : null
     },
     include: {
       unit: {
+        include: {
+          project: true
+        }
+      },
+      project: true,
+      createdByUser: {
         select: {
           id: true,
-          code: true,
           name: true,
-          project: {
-            select: {
-              id: true,
-              name: true
-            }
+          email: true
+        }
+      },
+      pmAdvance: {
+        include: {
+          staff: {
+            select: { id: true, name: true }
           }
         }
       }
     }
   })
 
-  if (connectedPmAdvanceId) {
-    await db.pMAdvance.update({
-      where: { id: connectedPmAdvanceId },
-      data: {
-        remainingAmount: {
-          decrement: numericAmount
-        }
-      }
-    })
-  }
-
-  const amountLabel = formatCurrency(expense.amount)
-  const unitDisplay = expense.unit.name
-    ? `${expense.unit.code} • ${expense.unit.name}`
-    : expense.unit.code
-  const projectName = expense.unit.project?.name ?? null
+  const amountLabel = formatCurrency(accountingNote.amount)
+  const unitDisplay = accountingNote.unit.name
+    ? `${accountingNote.unit.code} • ${accountingNote.unit.name}`
+    : accountingNote.unit.code
+  const projectName = accountingNote.project?.name ?? accountingNote.unit.project?.name ?? null
   const sourceLabelEn = sourceType === "PM_ADVANCE" ? "PM advance" : "office fund"
   const sourceLabelAr = sourceType === "PM_ADVANCE" ? "مقدم المدير" : "خزنة المكتب"
-  const recordedDateLabel = formatDate(expense.recordedAt)
-  const remainingLabel = typeof pmAdvanceRemaining === "number" ? formatCurrency(pmAdvanceRemaining) : null
+  const recordedDateLabel = formatDate(recordedAtDate ?? accountingNote.createdAt)
 
   const humanReadable: HumanReadable = {
-    en: `Recorded an operational expense of ${amountLabel} for unit ${unitDisplay}${projectName ? ` in project ${projectName}` : ""} from the ${sourceLabelEn}${recordedDateLabel ? ` dated ${recordedDateLabel}` : ""}${remainingLabel ? `. Remaining advance: ${remainingLabel}` : ""}.`,
-    ar: `تم تسجيل مصروف تشغيلي بقيمة ${amountLabel} للوحدة ${unitDisplay}${projectName ? ` ضمن مشروع ${projectName}` : ""} من ${sourceLabelAr}${recordedDateLabel ? ` بتاريخ ${recordedDateLabel}` : ""}${remainingLabel ? `، والمتبقي من المقدم ${remainingLabel}` : ""}.`
+    en: `Created an accounting note for ${amountLabel} on unit ${unitDisplay}${projectName ? ` in project ${projectName}` : ""} from the ${sourceLabelEn}. Waiting for accountant review${recordedDateLabel ? ` (submitted ${recordedDateLabel})` : ""}.`,
+    ar: `تم إنشاء مذكرة محاسبية بقيمة ${amountLabel} للوحدة ${unitDisplay}${projectName ? ` ضمن مشروع ${projectName}` : ""} من ${sourceLabelAr}. بانتظار مراجعة المحاسب${recordedDateLabel ? ` (أُرسلت ${recordedDateLabel})` : ""}.`
   }
 
   const suggestions: Suggestion[] = [
     {
-      title: "عرض آخر المصروفات",
-      prompt: `هات أحدث 5 مصروفات تشغيل للوحدة ${unitCode}.`,
+      title: "متابعة حالة المذكرة",
+      prompt: "ما حالة المذكرة المحاسبية الأخيرة التي سجلتها؟",
       data: {
         projectId,
         unitCode
       }
-    },
-    pmAdvanceRemaining === undefined
-      ? undefined
-      : {
-          title: "متابعة رصيد المقدم",
-          prompt: "ذكرني بالرصيد المتبقي من مقدم المدير لهذا المشروع.",
-          data: {
-            projectId,
-            remaining: pmAdvanceRemaining
-          }
-        }
-  ].filter(Boolean) as Suggestion[]
+    }
+  ]
 
   return {
     status: 201,
     body: {
       success: true,
       projectId,
-      message: "Operational expense recorded",
+      message: "Accounting note submitted",
       meta: {
         unitCode,
         sourceType,
         pmAdvanceRemaining
       },
       data: {
-        expense: {
-          id: expense.id,
-          description: expense.description,
-          amount: expense.amount,
-          sourceType: expense.sourceType,
-          unit: expense.unit,
-          recordedAt: expense.recordedAt,
-          recordedByUserId: expense.recordedByUserId
-        }
+        accountingNote
       },
       humanReadable,
       suggestions
