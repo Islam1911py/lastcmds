@@ -12,6 +12,31 @@ This guide enumerates the webhooks available to the AI agent for the three core 
 
 ---
 
+## 📞 Contact Identity Gateway
+
+### POST `/api/webhooks/identity`
+First stop for any WhatsApp workflow. Provide a phone number and receive the matched entity.
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `phone` | ✅ | Accepts any format; the service normalises and expands variants. |
+
+**Sample Request**
+```json
+{
+  "phone": "+966500000000"
+}
+```
+
+**Response Cases**
+- **Project/Admin/Accountant User** (`contact.type = "USER"`): includes role, name, project assignments, and whether they can view all projects.
+- **Resident** (`contact.type = "RESIDENT"`): includes unit code, project name, and stored phones.
+- **Unknown**: `success = false` with guidance in `suggestions`.
+
+Use this before calling role-specific webhooks so the agent knows which API key or action to trigger next.
+
+---
+
 ## 👷 Project Manager Webhooks
 
 ### 1. POST `/api/webhooks/project-managers`
