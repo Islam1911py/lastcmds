@@ -324,7 +324,9 @@ export function analyzeExpenseSearch(rawSearchTerm: string): ExpenseSearchAnalys
 
     if (matchedEntry) {
       matchedSourceTypes.add(matchedEntry.type)
-      continue
+      if (matchedEntry.type !== "OTHER") {
+        continue
+      }
     }
 
     if (!seenTokens.has(token)) {

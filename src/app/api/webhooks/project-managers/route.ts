@@ -473,6 +473,24 @@ async function handleCreateOperationalExpense(
   })
 
   if (!unit) {
+    const availableUnits = await db.operationalUnit.findMany({
+      where: { projectId },
+      select: {
+        code: true,
+        name: true
+      },
+      orderBy: { code: "asc" },
+      take: 10
+    })
+
+    const hasAvailableUnits = availableUnits.length > 0
+    const formattedUnitsList = availableUnits
+      .map((candidate) => {
+        const label = candidate.name ? `${candidate.code} — ${candidate.name}` : candidate.code
+        return `• ${label}`
+      })
+      .join("\n")
+
     return {
       status: 404,
       body: {
@@ -481,15 +499,20 @@ async function handleCreateOperationalExpense(
         projectId,
         issues: { unitCode },
         humanReadable: {
-          en: "I could not find an operational unit with that code inside the project.",
-          ar: "لم أجد وحدة تشغيلية بهذا الكود داخل المشروع."
+          ar: hasAvailableUnits
+            ? `مش لاقي وحدة بالكود ده في المشروع. دي الوحدات المتاحة عندي:\n${formattedUnitsList}`
+            : "مش لاقي وحدة بالكود ده في المشروع."
         },
         suggestions: [
           {
-            title: "قائمة الأكواد المتاحة",
-            prompt: "اذكر لي أكواد الوحدات المتاحة في هذا المشروع.",
+            title: "اختيار كود صحيح",
+            prompt: hasAvailableUnits
+              ? "اختر كود من الوحدات اللي فوق وابعتلي الطلب تاني بالمعلومة الصحيحة."
+              : "اذكر لي كود وحدة صحيح في هذا المشروع لو متوفر عندك.",
             data: {
-              projectId
+              projectId,
+              attemptedUnitCode: unitCode,
+              availableUnits
             }
           }
         ]
