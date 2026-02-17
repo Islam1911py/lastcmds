@@ -159,6 +159,73 @@ const PAY_VERB_KEYWORDS = [
   "صرفوا"
 ]
 
+const STAFF_KEYWORDS = [
+  "موظف",
+  "موظفين",
+  "staff",
+  "عامل",
+  "عمال",
+  "فني",
+  "فنيين",
+  "technician",
+  "team",
+  "crew"
+]
+
+const RETRIEVE_VERB_KEYWORDS = [
+  "هات",
+  "هاتلي",
+  "جيب",
+  "جيبلي",
+  "اعرض",
+  "عرض",
+  "عرضلي",
+  "اظهر",
+  "show",
+  "list",
+  "fetch",
+  "report",
+  "استعلام",
+  "استعرض",
+  "ابحث",
+  "بحث",
+  "دور",
+  "دورلي",
+  "شوف",
+  "عايز اشوف",
+  "عايز اعرف",
+  "اعرف",
+  "عرفني",
+  "كم",
+  "قد ايه",
+  "قديه"
+]
+
+const STAFF_ADVANCE_STATUS_KEYWORDS: Record<"PENDING" | "DEDUCTED", string[]> = {
+  PENDING: ["معلقه", "معلقة", "pending", "متبقي", "الباقي", "رصيد", "outstanding"],
+  DEDUCTED: ["مخصوم", "مخصومة", "خصمت", "deducted", "مدفوع", "مسددة", "paid"]
+}
+
+const ACCOUNTING_NOTE_QUERY_KEYWORDS = [
+  "قيد",
+  "قيود",
+  "قيد محاسبي",
+  "محاسبية",
+  "ملاحظه محاسبيه",
+  "ملاحظات محاسبية",
+  "ملاحظة محاسبية",
+  "accounting note",
+  "accounting notes",
+  "note",
+  "notes"
+]
+
+const ACCOUNTING_NOTE_STATUS_KEYWORDS: Record<"PENDING" | "CONVERTED" | "REJECTED", string[]> = {
+  PENDING: ["معلقه", "معلقة", "pending", "منتظره", "منتظرة"],
+  CONVERTED: ["محوله", "محولة", "converted", "recorded", "مسجلة"],
+  REJECTED: ["مرفوض", "مرفوضة", "rejected", "رفض"]
+}
+
 const PROJECT_SUMMARY_KEYWORDS = [
   "ملخص",
   "وضع",
@@ -210,7 +277,12 @@ const PARAM_DISPLAY_LABEL: Record<string, string> = {
   unitCode: "كود الوحدة",
   residentName: "اسم الساكن",
   limit: "الحد الأقصى",
-  statuses: "حالات التذاكر"
+  statuses: "حالات التذاكر",
+  query: "نص البحث",
+  search: "كلمة البحث",
+  fromDate: "تاريخ البداية",
+  toDate: "تاريخ النهاية",
+  status: "حالة الطلب"
 }
 
 const TICKET_TOPIC_KEYWORDS: Array<{ label: string; tokens: string[] }> = [
@@ -258,6 +330,10 @@ const STATUS_KEYWORDS: Record<string, string[]> = {
 }
 
 type Role = "ADMIN" | "ACCOUNTANT" | "PROJECT_MANAGER"
+
+type StaffAdvanceStatus = "PENDING" | "DEDUCTED"
+
+type AccountingNoteStatus = "PENDING" | "CONVERTED" | "REJECTED" | "ALL"
 
 type Suggestion = {
   title: string
@@ -356,6 +432,33 @@ function detectUnitCode(question: string) {
     return match[1].trim()
   }
   return null
+}
+
+function detectMappedValues(question: string, mapping: Record<string, string[]>) {
+  const normalizedQuestion = normalize(question)
+  const values = new Set<string>()
+
+  for (const [key, tokens] of Object.entries(mapping)) {
+    if (tokens.some((token) => normalizedQuestion.includes(normalize(token)))) {
+      values.add(key)
+    }
+  }
+
+  return Array.from(values)
+}
+
+function extractExplicitLimit(question: string, max = 100) {
+  const match = question.match(/(\d+)/)
+  if (!match) {
+    return null
+  }
+
+  const numeric = Number(match[1])
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return null
+  }
+
+  return Math.min(Math.trunc(numeric), max)
 }
 
 async function matchProject(question: string, explicitProjectName?: string | null) {
@@ -645,6 +748,246 @@ function buildResidentPhoneCandidate(options: {
     ],
     humanReadable: {
       ar: `استخدم إجراء GET_RESIDENT_PHONE لاسترجاع رقم الساكن للوحدة المطلوبة${options.projectName ? ` داخل ${options.projectName}` : ""}.`
+    }
+  }
+}
+
+function buildAccountantListUnitExpensesCandidate(options: {
+  role: Role
+  projectId?: string | null
+  projectName?: string | null
+  unitCode?: string | null
+  searchTokens: string[]
+  limit?: number | null
+}): InterpretationCandidate {
+  const payload: { action: string; senderPhone: string; payload: Record<string, unknown> } = {
+    action: "LIST_UNIT_EXPENSES",
+    senderPhone: "{{accountantPhone}}",
+    payload: {
+      ...(options.projectId ? { projectId: options.projectId } : {}),
+      ...(options.unitCode ? { unitCode: options.unitCode } : {}),
+      ...(options.limit && options.limit > 0 ? { limit: Math.min(options.limit, 100) } : {})
+    }
+  }
+
+  const searchTokens = Array.from(
+    new Set([
+      ...options.searchTokens,
+      ...(options.unitCode ? [options.unitCode] : [])
+    ])
+  )
+
+  const prioritizedSearch = options.searchTokens.find((token) => !["مصروف", "مصاريف", "صرف", "expense", "cost", "budget"].includes(token))
+  if (prioritizedSearch) {
+    payload.payload.search = prioritizedSearch
+  }
+
+  return {
+    id: "accountant-list-unit-expenses",
+    confidence: Math.min(
+      0.9,
+      0.62 + (options.projectId ? 0.08 : 0) + (options.unitCode ? 0.06 : 0) + Math.min(searchTokens.length * 0.04, 0.12)
+    ),
+    role: options.role,
+    description: "قائمة مصروفات الوحدات مع فلاتر المصدر والتواريخ",
+    missingParameters: [],
+    searchTerms: searchTokens,
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload
+    },
+    requiredParameters: [],
+    optionalParameters: ["projectId", "unitCode", "search", "sourceTypes", "fromDate", "toDate", "limit"],
+    postProcess: [
+      "استخدم meta.breakdownBySourceType لتحليل المصروفات حسب النوع",
+      "تحقق من meta.dateFilter لتأكيد نطاق التواريخ",
+      "اعرض تفاصيل كل مصروف مع الوحدة والمصدر والمبلغ"
+    ],
+    humanReadable: {
+      ar: `استدعي LIST_UNIT_EXPENSES للحصول على مصروفات ${options.projectName ? options.projectName : "الوحدات"}${
+        options.unitCode ? ` (الوحدة ${options.unitCode})` : ""
+      } ثم حلل النتائج بالمجموع الإجمالي.`
+    }
+  }
+}
+
+function buildAccountantSearchStaffCandidate(options: {
+  role: Role
+  projectId?: string | null
+  projectName?: string | null
+  matchedKeywords: string[]
+  limit?: number | null
+  onlyPending: boolean
+}): InterpretationCandidate {
+  const payload: { action: string; senderPhone: string; payload: Record<string, unknown> } = {
+    action: "SEARCH_STAFF",
+    senderPhone: "{{accountantPhone}}",
+    payload: {
+      query: "{{query}}",
+      ...(options.projectId ? { projectId: options.projectId } : {})
+    }
+  }
+
+  if (options.limit && options.limit > 0) {
+    payload.payload.limit = Math.min(options.limit, 50)
+  }
+
+  if (options.onlyPending) {
+    payload.payload.onlyWithPendingAdvances = true
+  }
+
+  const uniqueTerms = Array.from(new Set(options.matchedKeywords))
+
+  return {
+    id: "accountant-search-staff",
+    confidence: Math.min(
+      0.86,
+      0.6 + options.matchedKeywords.length * 0.05 + (options.projectId ? 0.04 : 0) + (options.onlyPending ? 0.04 : 0)
+    ),
+    role: options.role,
+    description: "البحث عن موظف بالاسم مع إبراز السلف المعلقة",
+    missingParameters: ["query"],
+    searchTerms: uniqueTerms,
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload
+    },
+    requiredParameters: ["query"],
+    optionalParameters: ["projectId", "limit", "onlyWithPendingAdvances"],
+    postProcess: [
+      "راجع meta.staffSearch.matches لعرض أفضل النتائج بالدرجات",
+      "استخدم meta.staffAdvances لتوضيح السلف المعلقة إن وجدت"
+    ],
+    humanReadable: {
+      ar: `استدعي SEARCH_STAFF${options.projectName ? ` مع ربطه بالمشروع ${options.projectName}` : ""} ثم مرر اسم الموظف في query قبل التنفيذ.`
+    }
+  }
+}
+
+function buildAccountantListStaffAdvancesCandidate(options: {
+  role: Role
+  projectId?: string | null
+  projectName?: string | null
+  matchedKeywords: string[]
+  limit?: number | null
+  status?: StaffAdvanceStatus
+}): InterpretationCandidate {
+  const payload: { action: string; senderPhone: string; payload: Record<string, unknown> } = {
+    action: "LIST_STAFF_ADVANCES",
+    senderPhone: "{{accountantPhone}}",
+    payload: {
+      ...(options.projectId ? { projectId: options.projectId } : {})
+    }
+  }
+
+  if (options.limit && options.limit > 0) {
+    payload.payload.limit = Math.min(options.limit, 200)
+  }
+
+  if (options.status) {
+    payload.payload.status = options.status
+  }
+
+  const searchTerms = Array.from(
+    new Set([
+      ...options.matchedKeywords,
+      ...(options.status ? [options.status] : [])
+    ])
+  )
+
+  return {
+    id: "accountant-list-staff-advances",
+    confidence: Math.min(
+      0.83,
+      0.58 + options.matchedKeywords.length * 0.05 + (options.status ? 0.05 : 0) + (options.projectId ? 0.04 : 0)
+    ),
+    role: options.role,
+    description: "قائمة بسلف الموظفين مع الإجمالي",
+    missingParameters: [],
+    searchTerms,
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload
+    },
+    requiredParameters: [],
+    optionalParameters: ["query", "status", "projectId", "limit"],
+    postProcess: [
+      "اعرض totals من meta.totals بما يشمل count و amount",
+      "حدد السلف المعلقة أو المخصومة بناءً على النتائج",
+      "استخدم meta.staffSearch إن توفر لتأكيد الأسماء"
+    ],
+    humanReadable: {
+      ar: `استخدم LIST_STAFF_ADVANCES لاسترجاع السلف${options.projectName ? ` داخل ${options.projectName}` : ""} ثم لخّص الإجمالي والحالات.`
+    }
+  }
+}
+
+function buildAccountantSearchAccountingNotesCandidate(options: {
+  role: Role
+  projectId?: string | null
+  projectName?: string | null
+  unitCode?: string | null
+  matchedKeywords: string[]
+  limit?: number | null
+  status?: AccountingNoteStatus
+  includeConverted: boolean
+}): InterpretationCandidate {
+  const payload: { action: string; senderPhone: string; payload: Record<string, unknown> } = {
+    action: "SEARCH_ACCOUNTING_NOTES",
+    senderPhone: "{{accountantPhone}}",
+    payload: {
+      ...(options.projectId ? { projectId: options.projectId } : {}),
+      ...(options.unitCode ? { unitCode: options.unitCode } : {})
+    }
+  }
+
+  if (options.limit && options.limit > 0) {
+    payload.payload.limit = Math.min(options.limit, 150)
+  }
+
+  if (options.status) {
+    payload.payload.status = options.status
+  }
+
+  if (options.includeConverted) {
+    payload.payload.includeConverted = true
+  }
+
+  const searchTerms = Array.from(
+    new Set([
+      ...options.matchedKeywords,
+      ...(options.unitCode ? [options.unitCode] : []),
+      ...(options.status && options.status !== "ALL" ? [options.status] : [])
+    ])
+  )
+
+  return {
+    id: "accountant-search-accounting-notes",
+    confidence: Math.min(
+      0.85,
+      0.58 + options.matchedKeywords.length * 0.05 + (options.status && options.status !== "ALL" ? 0.05 : 0) + (options.unitCode ? 0.04 : 0) + (options.includeConverted ? 0.02 : 0)
+    ),
+    role: options.role,
+    description: "بحث في القيود المحاسبية مع التحكم في الحالة",
+    missingParameters: [],
+    searchTerms,
+    http: {
+      method: "POST",
+      endpoint: "/api/webhooks/accountants",
+      payload
+    },
+    requiredParameters: [],
+    optionalParameters: ["query", "status", "projectId", "unitCode", "limit", "includeConverted"],
+    postProcess: [
+      "استخدم meta.totals.count و meta.totals.amount لعرض ملخص القيود",
+      "استفد من meta.searchAnalysis.tokens لشرح معايير البحث المستخدمة",
+      "اذكر القيود مع المشروع والوحدة وأي عهدة مرتبطة"
+    ],
+    humanReadable: {
+      ar: `استدعي SEARCH_ACCOUNTING_NOTES${options.projectName ? ` مع المشروع ${options.projectName}` : ""} ثم طبّق المرشحات المطلوبة قبل الرد.`
     }
   }
 }
@@ -992,6 +1335,11 @@ export async function POST(req: NextRequest) {
     const matchedUpdateVerbs = detectKeywords(normalizedQuestion, UPDATE_VERB_KEYWORDS)
     const matchedDeleteVerbs = detectKeywords(normalizedQuestion, DELETE_VERB_KEYWORDS)
     const matchedPayVerbs = detectKeywords(normalizedQuestion, PAY_VERB_KEYWORDS)
+    const matchedRetrieveVerbs = detectKeywords(normalizedQuestion, RETRIEVE_VERB_KEYWORDS)
+    const matchedStaff = detectKeywords(normalizedQuestion, STAFF_KEYWORDS)
+    const staffAdvanceStatusHints = detectMappedValues(question, STAFF_ADVANCE_STATUS_KEYWORDS)
+    const matchedAccountingNoteQueries = detectKeywords(normalizedQuestion, ACCOUNTING_NOTE_QUERY_KEYWORDS)
+    const accountingNoteStatusHints = detectMappedValues(question, ACCOUNTING_NOTE_STATUS_KEYWORDS)
     const mentionsUnit =
       normalizedQuestion.includes("وحدة") ||
       normalizedQuestion.includes("شقة") ||
@@ -1038,6 +1386,45 @@ export async function POST(req: NextRequest) {
     }
 
     if (role === "ACCOUNTANT") {
+      if (
+        matchedExpenses.length > 0 &&
+        (
+          matchedRetrieveVerbs.length > 0 ||
+          (!matchedCreateVerbs.length && (mentionsUnit || matchedExpenses.some((keyword) => keyword !== "مصروف" && keyword !== "مصاريف" && keyword !== "expense" && keyword !== "cost")))
+        )
+      ) {
+        const expenseLimit = extractExplicitLimit(question, 100)
+        candidates.push(
+          buildAccountantListUnitExpensesCandidate({
+            role,
+            projectId: projectMatch?.id ?? null,
+            projectName: projectMatch?.name ?? null,
+            unitCode,
+            searchTokens: matchedExpenses,
+            limit: expenseLimit
+          })
+        )
+      }
+
+      if (matchedStaff.length > 0 && matchedRetrieveVerbs.length > 0) {
+        const staffSearchLimit = extractExplicitLimit(question, 50)
+        const pendingOnly = staffAdvanceStatusHints.includes("PENDING")
+        candidates.push(
+          buildAccountantSearchStaffCandidate({
+            role,
+            projectId: projectMatch?.id ?? null,
+            projectName: projectMatch?.name ?? null,
+            matchedKeywords: matchedStaff.concat(matchedRetrieveVerbs),
+            limit: staffSearchLimit,
+            onlyPending: pendingOnly
+          })
+        )
+      }
+
+      const staffAdvanceStatusHint = staffAdvanceStatusHints.find(
+        (status): status is StaffAdvanceStatus => status === "PENDING" || status === "DEDUCTED"
+      )
+
       if (matchedPmAdvance.length > 0) {
         candidates.push(
           buildCreatePmAdvanceCandidate({
@@ -1064,6 +1451,18 @@ export async function POST(req: NextRequest) {
               matchedKeywords: matchedStaffAdvance.concat(matchedUpdateVerbs)
             })
           )
+        } else if (matchedRetrieveVerbs.length > 0 || staffAdvanceStatusHint) {
+          const advancesLimit = extractExplicitLimit(question, 200)
+          candidates.push(
+            buildAccountantListStaffAdvancesCandidate({
+              role,
+              projectId: projectMatch?.id ?? null,
+              projectName: projectMatch?.name ?? null,
+              matchedKeywords: matchedStaffAdvance.concat(matchedRetrieveVerbs, staffAdvanceStatusHints),
+              limit: advancesLimit,
+              status: staffAdvanceStatusHint
+            })
+          )
         } else {
           candidates.push(
             buildCreateStaffAdvanceCandidate({
@@ -1079,6 +1478,36 @@ export async function POST(req: NextRequest) {
           buildRecordAccountingNoteCandidate({
             role,
             matchedKeywords: matchedAccountingNoteActions
+          })
+        )
+      }
+
+      if (
+        matchedAccountingNoteQueries.length > 0 &&
+        (matchedRetrieveVerbs.length > 0 || matchedAccountingNoteActions.length === 0)
+      ) {
+        const noteStatuses = accountingNoteStatusHints
+        let resolvedStatus: AccountingNoteStatus | undefined
+
+        if (noteStatuses.length === 1) {
+          resolvedStatus = noteStatuses[0] as AccountingNoteStatus
+        } else if (noteStatuses.length > 1) {
+          resolvedStatus = "ALL"
+        }
+
+        const includeConverted = noteStatuses.includes("CONVERTED")
+        const notesLimit = extractExplicitLimit(question, 150)
+
+        candidates.push(
+          buildAccountantSearchAccountingNotesCandidate({
+            role,
+            projectId: projectMatch?.id ?? null,
+            projectName: projectMatch?.name ?? null,
+            unitCode,
+            matchedKeywords: matchedAccountingNoteQueries.concat(matchedRetrieveVerbs, noteStatuses),
+            limit: notesLimit,
+            status: resolvedStatus,
+            includeConverted
           })
         )
       }

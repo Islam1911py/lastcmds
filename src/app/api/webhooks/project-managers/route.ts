@@ -3,6 +3,12 @@ import { NextRequest, NextResponse } from "next/server"
 import type { Prisma } from "@prisma/client"
 
 import { db } from "@/lib/db"
+import {
+  analyzeExpenseSearch,
+  buildDescriptionFilter,
+  EXPENSE_SOURCE_TYPES,
+  type ExpenseSourceType
+} from "@/lib/expense-search"
 import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { buildPhoneVariants } from "@/lib/phone"
 
@@ -117,15 +123,6 @@ type GenericActionHandler = (
   manager: ManagerRecord,
   payload: Record<string, unknown>
 ) => Promise<HandlerResponse>
-
-const EXPENSE_SOURCE_TYPES = [
-  "TECHNICIAN_WORK",
-  "STAFF_WORK",
-  "ELECTRICITY",
-  "OTHER"
-] as const
-
-type ExpenseSourceType = (typeof EXPENSE_SOURCE_TYPES)[number]
 
 type UnitExpenseWithRelations = Prisma.UnitExpenseGetPayload<{
   include: {
@@ -1258,11 +1255,38 @@ async function handleUnitExpensesList(
     }
   }
 
-  const validSourceTypes: ExpenseSourceType[] = Array.isArray(sourceTypes)
+  const explicitSourceTypes: ExpenseSourceType[] = Array.isArray(sourceTypes)
     ? sourceTypes.filter((type: string): type is ExpenseSourceType =>
         EXPENSE_SOURCE_TYPES.includes(type as ExpenseSourceType)
       )
     : []
+  const explicitSourceTypeSet = new Set(explicitSourceTypes)
+
+  const rawSearchTerm =
+    typeof search === "string" && search.trim().length > 0 ? search.trim() : null
+  let cleanedSearchTerm: string | null = null
+  let matchedSourceTypes = new Set<ExpenseSourceType>()
+  let descriptionTokensForFilter: string[] = []
+
+  if (rawSearchTerm) {
+    const analysis = analyzeExpenseSearch(rawSearchTerm)
+    matchedSourceTypes = analysis.matchedSourceTypes
+    descriptionTokensForFilter = analysis.descriptionTokens
+    cleanedSearchTerm = analysis.descriptionSummary
+  }
+
+  let finalTypeSet: Set<ExpenseSourceType> | null =
+    explicitSourceTypeSet.size > 0 ? new Set(explicitSourceTypeSet) : null
+
+  if (matchedSourceTypes.size > 0) {
+    if (finalTypeSet) {
+      finalTypeSet = new Set(
+        [...finalTypeSet].filter((type) => matchedSourceTypes.has(type))
+      )
+    } else {
+      finalTypeSet = new Set(matchedSourceTypes)
+    }
+  }
 
   let fromDateValue: Date | null = null
   let toDateValue: Date | null = null
@@ -1302,7 +1326,6 @@ async function handleUnitExpensesList(
   }
 
   const take = parseLimit(limit, 10, 50)
-  const normalizedSearch = typeof search === "string" && search.trim().length > 0 ? search.trim() : null
 
   if (fromDateValue) {
     fromDateValue.setHours(0, 0, 0, 0)
@@ -1319,54 +1342,70 @@ async function handleUnitExpensesList(
     dateFilters.lte = toDateValue
   }
 
-  const whereClause: Prisma.UnitExpenseWhereInput = {
-    unit: {
-      projectId,
-      ...(unit ? { id: unit.id } : {})
+  const descriptionFilter =
+    descriptionTokensForFilter.length > 0
+      ? buildDescriptionFilter(descriptionTokensForFilter)
+      : null
+
+  const shouldSkipQuery = finalTypeSet !== null && finalTypeSet.size === 0
+  const appliedSourceTypesForFilter =
+    finalTypeSet && finalTypeSet.size > 0 ? Array.from(finalTypeSet) : []
+
+  const whereClauses: Prisma.UnitExpenseWhereInput[] = [
+    {
+      unit: {
+        projectId,
+        ...(unit ? { id: unit.id } : {})
+      }
     }
+  ]
+
+  if (appliedSourceTypesForFilter.length > 0) {
+    whereClauses.push({
+      sourceType: { in: appliedSourceTypesForFilter }
+    })
   }
 
-  if (validSourceTypes.length > 0) {
-    whereClause.sourceType = { in: validSourceTypes }
-  }
-
-  if (normalizedSearch) {
-    whereClause.description = {
-      contains: normalizedSearch
-    }
+  if (descriptionFilter) {
+    whereClauses.push(descriptionFilter)
   }
 
   if (Object.keys(dateFilters).length > 0) {
-    whereClause.date = dateFilters
+    whereClauses.push({ date: dateFilters })
   }
 
-  const expenses = (await db.unitExpense.findMany({
-    where: whereClause,
-    include: {
-      unit: {
-        select: {
-          id: true,
-          code: true,
-          name: true
-        }
-      },
-      recordedByUser: {
-        select: {
-          id: true,
-          name: true
-        }
-      },
-      pmAdvance: {
-        select: {
-          id: true,
-          amount: true,
-          remainingAmount: true
-        }
-      }
-    },
-    orderBy: { date: "desc" },
-    take
-  })) as UnitExpenseWithRelations[]
+  const whereClause: Prisma.UnitExpenseWhereInput =
+    whereClauses.length === 1 ? whereClauses[0] : { AND: whereClauses }
+
+  const expenses = shouldSkipQuery
+    ? []
+    : (await db.unitExpense.findMany({
+        where: whereClause,
+        include: {
+          unit: {
+            select: {
+              id: true,
+              code: true,
+              name: true
+            }
+          },
+          recordedByUser: {
+            select: {
+              id: true,
+              name: true
+            }
+          },
+          pmAdvance: {
+            select: {
+              id: true,
+              amount: true,
+              remainingAmount: true
+            }
+          }
+        },
+        orderBy: { date: "desc" },
+        take
+      })) as UnitExpenseWithRelations[]
 
   const totalAmount = expenses.reduce((sum, expense) => sum + (expense.amount ?? 0), 0)
   const latestExpense = expenses[0]
@@ -1383,28 +1422,29 @@ async function handleUnitExpensesList(
       ? `${unitCodes.length} units`
       : "project"
   const latestDateLabel = latestExpense ? formatDate(latestExpense.date) : null
+  const searchLabel = rawSearchTerm ? ` matching "${rawSearchTerm}"` : ""
 
   const humanReadable: HumanReadable = expenses.length
     ? {
-        en: `Found ${expenses.length} expenses for ${unit ? `unit ${unitLabel}` : `the project`} totalling ${formatCurrency(totalAmount)}${normalizedSearch ? ` matching "${normalizedSearch}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "en") : ""}.${latestDateLabel ? ` Latest on ${latestDateLabel}.` : ""}`,
-        ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} لـ ${unit ? `الوحدة ${unitLabel}` : "المشروع"} بإجمالي ${formatCurrency(totalAmount)}${normalizedSearch ? ` مطابقة لـ "${normalizedSearch}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "ar") : ""}.${latestDateLabel ? ` آخر مصروف بتاريخ ${latestDateLabel}.` : ""}`
+        en: `Found ${expenses.length} expenses for ${unit ? `unit ${unitLabel}` : `the project`} totalling ${formatCurrency(totalAmount)}${searchLabel}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "en") : ""}.${latestDateLabel ? ` Latest on ${latestDateLabel}.` : ""}`,
+        ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} لـ ${unit ? `الوحدة ${unitLabel}` : "المشروع"} بإجمالي ${formatCurrency(totalAmount)}${rawSearchTerm ? ` مطابقة لـ "${rawSearchTerm}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "ar") : ""}.${latestDateLabel ? ` آخر مصروف بتاريخ ${latestDateLabel}.` : ""}`
       }
     : {
         en: unit
-          ? normalizedSearch
-            ? `No expenses matched "${normalizedSearch}" for unit ${unitLabel}.`
+          ? rawSearchTerm
+            ? `No expenses matched "${rawSearchTerm}" for unit ${unitLabel}.`
             : `No expenses recorded yet for unit ${unitLabel}.`
-          : normalizedSearch
-            ? `No expenses matched "${normalizedSearch}" for this project.`
+          : rawSearchTerm
+            ? `No expenses matched "${rawSearchTerm}" for this project.`
             : fromDateValue || toDateValue
               ? "No expenses found for the selected date range."
               : "No expenses recorded yet for this project.",
         ar: unit
-          ? normalizedSearch
-            ? `لا توجد مصروفات مطابقة لـ "${normalizedSearch}" للوحدة ${unitLabel}.`
+          ? rawSearchTerm
+            ? `لا توجد مصروفات مطابقة لـ "${rawSearchTerm}" للوحدة ${unitLabel}.`
             : `لا توجد مصروفات مسجلة حتى الآن للوحدة ${unitLabel}.`
-          : normalizedSearch
-            ? `لا توجد مصروفات مطابقة لـ "${normalizedSearch}" لهذا المشروع.`
+          : rawSearchTerm
+            ? `لا توجد مصروفات مطابقة لـ "${rawSearchTerm}" لهذا المشروع.`
             : fromDateValue || toDateValue
               ? "لا توجد مصروفات في نطاق التاريخ المحدد."
               : "لا توجد مصروفات مسجلة لهذا المشروع."
@@ -1432,7 +1472,7 @@ async function handleUnitExpensesList(
                 projectId
               }
             },
-        normalizedSearch
+        rawSearchTerm
           ? undefined
           : {
               title: "بحث في الوصف",
@@ -1483,8 +1523,12 @@ async function handleUnitExpensesList(
         unitCode: unit?.code ?? null,
         count: expenses.length,
         totalAmount,
-        filteredSourceTypes: validSourceTypes,
-        search: normalizedSearch,
+        filteredSourceTypes: appliedSourceTypesForFilter,
+        requestedSourceTypes: explicitSourceTypes,
+        detectedSourceTypesFromSearch: Array.from(matchedSourceTypes),
+        search: rawSearchTerm,
+        descriptionSearchTerm: cleanedSearchTerm,
+        skippedQueryBecauseOfFilters: shouldSkipQuery,
         fromDate: fromDateValue ? formatDate(fromDateValue) : null,
         toDate: toDateValue ? formatDate(toDateValue) : null
       },
