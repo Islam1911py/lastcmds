@@ -1,508 +1,143 @@
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Webhook API Action Schema",
-  "description": "Role-separated catalog of webhook endpoints with JSON schema parameters.",
-  "type": "object",
-  "properties": {
-    "roles": {
-      "type": "array",
-      "items": [
-        {
-          "role": "ADMIN",
-          "description": "Endpoints reserved for admin API keys.",
-          "endpoints": [
-            {
-              "url": "/api/webhooks/query",
-              "method": "GET",
-              "authentication": "X-API-KEY header tied to an ADMIN user",
-              "queryTypes": [
-                {
-                  "name": "ALL_DATA",
-                  "description": "Retrieve platform-wide statistics (projects, units, residents, tickets, invoices, staff).",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "type": { "type": "string", "enum": ["ALL_DATA", "DEFAULT"] },
-                      "senderPhone": { "type": ["string", "null"], "pattern": "^\\+?[0-9]{8,15}$" }
-                    },
-                    "required": ["type"],
-                    "additionalProperties": true
-                  },
-                  "notes": [
-                    "If type is omitted the handler defaults to ALL_DATA for admin keys.",
-                    "Response meta carries summary counts for leadership dashboards."
-                  ]
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "role": "PROJECT_MANAGER",
-          "description": "Actions and queries available to project manager API keys.",
-          "endpoints": [
-            {
-              "url": "/api/webhooks/project-managers",
-              "method": "POST",
-              "authentication": "X-API-KEY header tied to a PROJECT_MANAGER user",
-              "envelope": {
-                "type": "object",
-                "required": ["action", "senderPhone", "payload"],
-                "additionalProperties": false,
-                "properties": {
-                  "action": { "type": "string" },
-                  "senderPhone": { "type": "string", "pattern": "^\\+?[0-9]{8,15}$" },
-                  "payload": { "type": "object" }
-                }
-              },
-              "actions": [
-                {
-                  "name": "CREATE_OPERATIONAL_EXPENSE",
-                  "description": "Submit an operational expense for accounting review.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "projectId": { "type": "string" },
-                      "unitCode": { "type": "string" },
-                      "description": { "type": "string", "minLength": 1 },
-                      "amount": {
-                        "oneOf": [
-                          { "type": "number", "exclusiveMinimum": 0 },
-                          { "type": "string", "pattern": "^\\d+(?:\\.\\d+)?$" }
-                        ]
-                      },
-                      "sourceType": { "type": "string", "enum": ["OFFICE_FUND", "PM_ADVANCE"] },
-                      "pmAdvanceId": { "type": ["string", "null"] },
-                      "recordedAt": { "type": ["string", "null"], "format": "date-time" }
-                    },
-                    "required": ["projectId", "unitCode", "description", "amount", "sourceType"],
-                    "additionalProperties": false
-                  },
-                  "notes": [
-                    "Managers must be assigned to the project or have global project visibility.",
-                    "pmAdvanceId is mandatory when sourceType is PM_ADVANCE."
-                  ]
-                },
-                {
-                  "name": "GET_RESIDENT_PHONE",
-                  "description": "Fetch phone details for a resident within a project unit.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "projectId": { "type": "string" },
-                      "unitCode": { "type": "string" },
-                      "residentName": { "type": ["string", "null"] },
-                      "limit": {
-                        "oneOf": [
-                          { "type": "integer", "minimum": 1, "maximum": 5 },
-                          { "type": "string", "pattern": "^\\d+$" }
-                        ]
-                      }
-                    },
-                    "required": ["projectId", "unitCode"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "LIST_PROJECT_TICKETS",
-                  "description": "List tickets for a project with optional status or unit filters.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "projectId": { "type": "string" },
-                      "unitCode": { "type": ["string", "null"] },
-                      "statuses": {
-                        "type": ["array", "null"],
-                        "items": { "type": "string" }
-                      },
-                      "limit": {
-                        "oneOf": [
-                          { "type": "integer", "minimum": 1, "maximum": 50 },
-                          { "type": "string", "pattern": "^\\d+$" }
-                        ]
-                      }
-                    },
-                    "required": ["projectId"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "LIST_PROJECT_UNITS",
-                  "description": "Return operational units for the project with optional search and limit settings.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "projectId": { "type": "string" },
-                      "includeInactive": { "type": ["boolean", "null"] },
-                      "limit": {
-                        "oneOf": [
-                          { "type": "integer", "minimum": 1, "maximum": 100 },
-                          { "type": "string", "pattern": "^\\d+$" }
-                        ]
-                      },
-                      "search": { "type": ["string", "null"] }
-                    },
-                    "required": ["projectId"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "LIST_UNIT_EXPENSES",
-                  "description": "List unit expenses visible to the project manager.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "projectId": { "type": "string" },
-                      "unitCode": { "type": ["string", "null"] },
-                      "limit": {
-                        "oneOf": [
-                          { "type": "integer", "minimum": 1, "maximum": 50 },
-                          { "type": "string", "pattern": "^\\d+$" }
-                        ]
-                      },
-                      "sourceTypes": {
-                        "type": ["array", "null"],
-                        "items": { "type": "string", "enum": ["TECHNICIAN_WORK", "STAFF_WORK", "ELECTRICITY", "OTHER"] }
-                      },
-                      "search": { "type": ["string", "null"] },
-                      "fromDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
-                      "toDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
-                    },
-                    "required": ["projectId"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "GET_LAST_ELECTRICITY_TOPUP",
-                  "description": "Fetch the latest electricity top-up for a unit within the manager's project.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "projectId": { "type": "string" },
-                      "unitCode": { "type": ["string", "null"] }
-                    },
-                    "required": ["projectId"],
-                    "additionalProperties": false
-                  }
-                }
-              ]
-            },
-            {
-              "url": "/api/webhooks/query",
-              "method": "GET",
-              "authentication": "X-API-KEY header tied to a PROJECT_MANAGER user",
-              "queryTypes": [
-                {
-                  "name": "LAST_EXPENSE",
-                  "description": "Retrieve recent accounting notes for the manager's project.",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "type": { "type": "string", "const": "LAST_EXPENSE" },
-                      "projectId": { "type": "string" },
-                      "range": { "type": ["string", "null"], "enum": ["TODAY", "WEEK", "MONTH", null] },
-                      "date": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
-                      "unit": { "type": ["string", "null"] },
-                      "senderPhone": { "type": ["string", "null"], "pattern": "^\\+?[0-9]{8,15}$" }
-                    },
-                    "required": ["type", "projectId"],
-                    "additionalProperties": false
-                  },
-                  "notes": [
-                    "Range overrides date if both are supplied.",
-                    "Managers must pass their assigned projectId explicitly."
-                  ]
-                },
-                {
-                  "name": "PROJECT_DATA",
-                  "description": "Project dashboard summary including residents, tickets, staff, and technicians.",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "type": { "type": "string", "enum": ["PROJECT_DATA", "DEFAULT"] },
-                      "projectId": { "type": "string" },
-                      "senderPhone": { "type": ["string", "null"], "pattern": "^\\+?[0-9]{8,15}$" }
-                    },
-                    "required": ["projectId"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "TICKET_BY_RESIDENT",
-                  "description": "List tickets linked to a resident inside the project.",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "type": { "type": "string", "const": "TICKET_BY_RESIDENT" },
-                      "projectId": { "type": "string" },
-                      "resident": { "type": "string" },
-                      "senderPhone": { "type": ["string", "null"], "pattern": "^\\+?[0-9]{8,15}$" }
-                    },
-                    "required": ["type", "projectId", "resident"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "TODAY_TICKETS",
-                  "description": "Tickets created today for the manager's project.",
-                  "parameters": {
-                    "type": "object",
-                    "properties": {
-                      "type": { "type": "string", "const": "TODAY_TICKETS" },
-                      "projectId": { "type": "string" },
-                      "senderPhone": { "type": ["string", "null"], "pattern": "^\\+?[0-9]{8,15}$" }
-                    },
-                    "required": ["type", "projectId"],
-                    "additionalProperties": false
-                  }
-                }
-              ]
-            }
-          ]
-        },
-        {
-          "role": "ACCOUNTANT",
-          "description": "Accounting actions and queries (also available to admins when acting as accountants).",
-          "endpoints": [
-            {
-              "url": "/api/webhooks/accountants",
-              "method": "POST",
-              "authentication": "X-API-KEY header tied to an ACCOUNTANT or ADMIN user",
-              "envelope": {
-                "type": "object",
-                "required": ["action", "senderPhone", "payload"],
-                "additionalProperties": false,
-                "properties": {
-                  "action": { "type": "string" },
-                  "senderPhone": { "type": "string", "pattern": "^\\+?[0-9]{8,15}$" },
-                  "payload": { "type": "object" }
-                }
-              },
-              "actions": [
-                {
-                  "name": "CREATE_PM_ADVANCE",
-                  "description": "Create a PM advance entry.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "staffId": { "type": ["string", "null"] },
-                      "staffQuery": { "type": ["string", "null"] },
-                      "amount": {
-                        "oneOf": [
-                          { "type": "number", "exclusiveMinimum": 0 },
-                          { "type": "string", "pattern": "^\\d+(?:\\.\\d+)?$" }
-                        ]
-                      },
-                      "projectId": { "type": ["string", "null"] },
-                      "notes": { "type": ["string", "null"] }
-                    },
-                    "required": ["amount"],
-                    "anyOf": [ { "required": ["staffId"] }, { "required": ["staffQuery"] } ],
-                    "additionalProperties": false
-                  },
-                  "notes": [
-                    "Either staffId or staffQuery must be provided.",
-                    "projectId is optional but validated when present."
-                  ]
-                },
-                {
-                  "name": "CREATE_STAFF_ADVANCE",
-                  "description": "Create a staff advance in pending status.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "staffId": { "type": ["string", "null"] },
-                      "staffQuery": { "type": ["string", "null"] },
-                      "amount": {
-                        "oneOf": [
-                          { "type": "number", "exclusiveMinimum": 0 },
-                          { "type": "string", "pattern": "^\\d+(?:\\.\\d+)?$" }
-                        ]
-                      },
-                      "note": { "type": ["string", "null"] }
-                    },
-                    "required": ["amount"],
-                    "anyOf": [ { "required": ["staffId"] }, { "required": ["staffQuery"] } ],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "UPDATE_STAFF_ADVANCE",
-                  "description": "Update amount or note on an existing pending advance.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "advanceId": { "type": "string" },
-                      "amount": {
-                        "oneOf": [
-                          { "type": "number", "exclusiveMinimum": 0 },
-                          { "type": "string", "pattern": "^\\d+(?:\\.\\d+)?$" }
-                        ]
-                      },
-                      "note": { "type": ["string", "null"] },
-                      "staffQuery": { "type": ["string", "null"] }
-                    },
-                    "required": ["advanceId"],
-                    "anyOf": [ { "required": ["amount"] }, { "required": ["note"] } ],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "DELETE_STAFF_ADVANCE",
-                  "description": "Delete a pending staff advance entry.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "advanceId": { "type": "string" },
-                      "staffQuery": { "type": ["string", "null"] }
-                    },
-                    "required": ["advanceId"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "RECORD_ACCOUNTING_NOTE",
-                  "description": "Convert a pending accounting note into an expense/invoice pair.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "noteId": { "type": "string" },
-                      "sourceType": { "type": ["string", "null"], "enum": ["OFFICE_FUND", "PM_ADVANCE", null] },
-                      "pmAdvanceId": { "type": ["string", "null"] }
-                    },
-                    "required": ["noteId"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "PAY_INVOICE",
-                  "description": "Record a payment toward an owner invoice.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "invoiceId": { "type": "string" },
-                      "amount": {
-                        "oneOf": [
-                          { "type": "number", "exclusiveMinimum": 0 },
-                          { "type": ["string", "null"], "pattern": "^\\d+(?:\\.\\d+)?$" }
-                        ]
-                      },
-                      "action": { "type": ["string", "null"], "enum": ["pay", "mark-paid", null] }
-                    },
-                    "required": ["invoiceId"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "CREATE_PAYROLL",
-                  "description": "Generate payroll for the specified month.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "month": { "type": "string", "pattern": "^\\d{4}-\\d{2}$" }
-                    },
-                    "required": ["month"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "PAY_PAYROLL",
-                  "description": "Mark a payroll as paid and deduct pending advances.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "payrollId": { "type": "string" }
-                    },
-                    "required": ["payrollId"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "LIST_UNIT_EXPENSES",
-                  "description": "List unit expenses with optional filters (accountant view).",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "projectId": { "type": ["string", "null"] },
-                      "unitCode": { "type": ["string", "null"] },
-                      "limit": {
-                        "oneOf": [
-                          { "type": "integer", "minimum": 1, "maximum": 100 },
-                          { "type": "string", "pattern": "^\\d+$" }
-                        ]
-                      },
-                      "sourceTypes": {
-                        "type": "array",
-                        "items": { "type": "string", "enum": ["TECHNICIAN_WORK", "STAFF_WORK", "ELECTRICITY", "OTHER"] }
-                      },
-                      "search": { "type": ["string", "null"] },
-                      "fromDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
-                      "toDate": { "type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
-                    },
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "SEARCH_STAFF",
-                  "description": "Fuzzy search for staff with optional pending-advance filter.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "query": { "type": "string" },
-                      "projectId": { "type": ["string", "null"] },
-                      "limit": {
-                        "oneOf": [
-                          { "type": "integer", "minimum": 1, "maximum": 50 },
-                          { "type": "string", "pattern": "^\\d+$" }
-                        ]
-                      },
-                      "onlyWithPendingAdvances": { "type": ["boolean", "null"] }
-                    },
-                    "required": ["query"],
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "LIST_STAFF_ADVANCES",
-                  "description": "List staff advances with optional status and name filters.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "query": { "type": ["string", "null"] },
-                      "status": { "type": ["string", "null"], "enum": ["PENDING", "DEDUCTED", "ALL", null] },
-                      "projectId": { "type": ["string", "null"] },
-                      "limit": {
-                        "oneOf": [
-                          { "type": "integer", "minimum": 1, "maximum": 200 },
-                          { "type": "string", "pattern": "^\\d+$" }
-                        ]
-                      }
-                    },
-                    "additionalProperties": false
-                  }
-                },
-                {
-                  "name": "SEARCH_ACCOUNTING_NOTES",
-                  "description": "Search accounting notes by text, status, or unit filters.",
-                  "payloadSchema": {
-                    "type": "object",
-                    "properties": {
-                      "query": { "type": ["string", "null"] },
-                      "status": { "type": ["string", "null"], "enum": ["PENDING", "CONVERTED", "REJECTED", "ALL", null] },
-                      "projectId": { "type": ["string", "null"] },
-                      "unitCode": { "type": ["string", "null"] },
-                      "limit": {
-                        "oneOf": [
-                          { "type": "integer", "minimum": 1, "maximum": 150 },
-                          { "type": "string", "pattern": "^\\d+$" }
-                        ]
-                      },
-                      "includeConverted": { "type": ["boolean", "null"] }
-                    },
-                    "additionalProperties": false
-                  }
-                }
-              ]
+Webhook Actions Overview
+========================
+
+The system exposes webhooks grouped by role. Use the sections below to pick the right endpoint, understand what each action does, and what parameters you must supply.
+
+-------------------------------------------------------------------------------
+Project Manager Toolkit
+-------------------------------------------------------------------------------
+
+Authentication: X-API-KEY for a PROJECT_MANAGER, senderPhone must match the manager’s WhatsApp.
+
+1. POST /api/webhooks/project-managers — action-based endpoint
+   - Shared envelope fields for every call:
+     * action: name of the operation to run
+     * senderPhone: manager phone number (WhatsApp format)
+     * payload: object carrying action specific data
+   - Supported actions:
+     • CREATE_OPERATIONAL_EXPENSE — raise an operational expense for accounting
+       Required payload fields: projectId, unitCode, description, amount, sourceType
+       Optional: pmAdvanceId (mandatory when sourceType = PM_ADVANCE), recordedAt
+       Usage: manager logs spending for unit/project; accounting receives it for approval.
+     • GET_RESIDENT_PHONE — pull contact info for a resident
+       Required: projectId, unitCode
+       Optional: residentName, limit (default 1)
+       Usage: manager needs to call a resident linked to a unit.
+     • LIST_PROJECT_TICKETS — list maintenance/support tickets
+       Required: projectId
+       Optional: unitCode, statuses[], limit
+       Usage: overview of open/closed tickets for chosen project.
+     • LIST_PROJECT_UNITS — show operational units
+       Required: projectId
+       Optional: includeInactive, limit, search
+       Usage: confirm units manager can access or filter by keyword.
+     • LIST_UNIT_EXPENSES — get expenses for units under manager scope
+       Required: projectId
+       Optional: unitCode, limit, sourceTypes[], search, fromDate, toDate
+       Usage: audit recent costs for a unit or date range.
+     • GET_LAST_ELECTRICITY_TOPUP — latest electricity top-up entry
+       Required: projectId
+       Optional: unitCode
+       Usage: check when a unit last topped up electricity.
+
+2. GET /api/webhooks/query — manager queries (type driven)
+   - Always include senderPhone (optional but recommended) and required fields per query.
+   - LAST_EXPENSE: type=LAST_EXPENSE, projectId required; optional range (TODAY/WEEK/MONTH), date, unit.
+   - PROJECT_DATA: type=PROJECT_DATA (defaults if omitted), projectId required.
+   - TICKET_BY_RESIDENT: type=TICKET_BY_RESIDENT, projectId, resident required.
+   - TODAY_TICKETS: type=TODAY_TICKETS, projectId required.
+   - Purpose: quick summaries without constructing payload objects.
+
+-------------------------------------------------------------------------------
+Accountant Toolkit
+-------------------------------------------------------------------------------
+
+Authentication: X-API-KEY for ACCOUNTANT or ADMIN acting as accountant, senderPhone is accountant line.
+
+1. POST /api/webhooks/accountants — action-based endpoint
+   - Shared envelope: action, senderPhone, payload (same structure as manager endpoint).
+   - Actions:
+     • CREATE_PM_ADVANCE — create advance for a project manager
+       Required payload: amount and one of (staffId | staffQuery)
+       Optional: projectId, notes
+       Usage: provide funds to a manager; agent can use staffQuery for fuzzy name.
+     • CREATE_STAFF_ADVANCE — pending advance for a staff member
+       Required: amount plus (staffId | staffQuery)
+       Optional: note
+       Usage: record employee advance before payroll deduction.
+     • UPDATE_STAFF_ADVANCE — adjust pending advance
+       Required: advanceId and at least one of (amount | note)
+       Optional: staffQuery
+       Usage: change amount or annotate reason.
+     • DELETE_STAFF_ADVANCE — remove pending advance
+       Required: advanceId
+       Optional: staffQuery
+       Usage: cancel mistakes before payroll deducts it.
+     • RECORD_ACCOUNTING_NOTE — convert accounting note into expense + invoice
+       Required: noteId
+       Optional: sourceType (OFFICE_FUND | PM_ADVANCE), pmAdvanceId when sourceType = PM_ADVANCE
+       Usage: formalize a note into the books.
+     • PAY_INVOICE — register payment or mark invoice paid
+       Required: invoiceId
+       Optional: amount, action (pay | mark-paid)
+       Usage: partial payment (pay + amount) or full close-out (mark-paid).
+     • CREATE_PAYROLL — generate payroll for month
+       Required: month (YYYY-MM)
+       Usage: initiates payroll computation; fails if month exists.
+     • PAY_PAYROLL — mark payroll paid
+       Required: payrollId
+       Usage: finalizes payroll and deducts advances.
+     • LIST_UNIT_EXPENSES — accountant view of unit expenses
+       Optional: projectId, unitCode, limit, sourceTypes[], search, fromDate, toDate
+       Usage: deeper filters than manager view, includes more data.
+     • SEARCH_STAFF — fuzzy staff search
+       Required: query
+       Optional: projectId, limit, onlyWithPendingAdvances
+       Usage: identify employees and check advance load.
+     • LIST_STAFF_ADVANCES — list advances with filters
+       Optional: query, status (PENDING/DEDUCTED/ALL), projectId, limit
+       Usage: produce reports or chase pending amounts.
+     • SEARCH_ACCOUNTING_NOTES — search accounting notes
+       Optional: query, status, projectId, unitCode, limit, includeConverted
+       Usage: find specific notes by text or state.
+
+2. GET /api/webhooks/query — accountant query endpoint
+   - ACCOUNTING_DATA: type=ACCOUNTING_DATA (or omit to default), optional senderPhone.
+   - Provides invoices, payments, pending accounting notes, plus stats for dashboards.
+
+-------------------------------------------------------------------------------
+Admin Toolkit
+-------------------------------------------------------------------------------
+
+Authentication: X-API-KEY for ADMIN. Admins may also call accountant actions above.
+
+1. GET /api/webhooks/query — platform snapshot
+   - ALL_DATA: type=ALL_DATA (defaults when missing), optional senderPhone.
+   - Returns counts and aggregates across projects, units, residents, tickets, invoices, staff.
+
+-------------------------------------------------------------------------------
+Shared Utilities (All Roles)
+-------------------------------------------------------------------------------
+
+1. POST /api/webhooks/query/interpret
+   - Purpose: send natural-language question; interpreter replies with recommended actions.
+   - Required body: question (string)
+   - Optional: projectName (helps tie question to project), role (ADMIN | ACCOUNTANT | PROJECT_MANAGER)
+
+2. POST /api/webhooks/identity
+   - Purpose: resolve contact/person details.
+   - Provide at least one of: phone, senderPhone, contact, query.
+   - Returns matched managed users or resident data.
+
+-------------------------------------------------------------------------------
+Usage Notes
+-------------------------------------------------------------------------------
+
+- senderPhone should always be the WhatsApp number formatted with optional leading + and 8-15 digits.
+- amount fields accept either numeric values or strings representing positive decimals.
+- limit fields accept numeric values; if omitted, defaults vary by handler.
+- All dates use ISO format YYYY-MM-DD; recordedAt supports full ISO date-time.
+- For multilingual prompts, make sure to pass clear action names in English as shown above.
             },
             {
               "url": "/api/webhooks/query",

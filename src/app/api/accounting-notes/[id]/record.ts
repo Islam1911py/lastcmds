@@ -2,11 +2,22 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { db as prisma } from "@/lib/db"
+import {
+  convertAccountingNote,
+  AccountingNoteAlreadyProcessedError,
+  AccountingNoteMissingUnitError,
+  AccountingNoteNotFoundError,
+  AccountingNotePmAdvanceInsufficientError,
+  AccountingNotePmAdvanceNotFoundError,
+  AccountingNotePmAdvanceRequiredError
+} from "@/lib/accounting-note-conversion"
 
 export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  const noteId = params.id
+
   try {
     const session = await getServerSession(authOptions)
 
@@ -19,135 +30,87 @@ export async function PATCH(
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
-    const noteId = params.id
     const body = await req.json()
     const { sourceType, pmAdvanceId } = body
 
-    // Fetch accounting note
-    const note = await prisma.accountingNote.findUnique({
-      where: { id: noteId },
-      include: {
-        unit: {
-          include: { project: true }
-        },
-        project: true,
-        pmAdvance: true
-      }
-    })
+    const normalizedSourceType = sourceType ?? undefined
 
-    if (!note) {
-      return NextResponse.json({ error: "Accounting note not found" }, { status: 404 })
-    }
-
-    if (note.status !== "PENDING") {
-      return NextResponse.json(
-        { error: "This note has already been recorded" },
-        { status: 400 }
-      )
-    }
-
-    const resolvedSourceType = sourceType ?? note.sourceType
-    const resolvedPmAdvanceId = pmAdvanceId ?? note.pmAdvanceId
-
-    if (resolvedSourceType !== "OFFICE_FUND" && resolvedSourceType !== "PM_ADVANCE") {
+    if (
+      normalizedSourceType &&
+      normalizedSourceType !== "OFFICE_FUND" &&
+      normalizedSourceType !== "PM_ADVANCE"
+    ) {
       return NextResponse.json({ error: "Invalid source type" }, { status: 400 })
     }
 
-    // Validate PM Advance if sourceType is PM_ADVANCE
-    if (resolvedSourceType === "PM_ADVANCE" && resolvedPmAdvanceId) {
-      const pmAdvance = await prisma.pMAdvance.findUnique({
-        where: { id: resolvedPmAdvanceId }
-      })
-
-      if (!pmAdvance) {
-        return NextResponse.json({ error: "PM Advance not found" }, { status: 404 })
-      }
-
-      if (pmAdvance.remainingAmount < note.amount) {
-        return NextResponse.json(
-          { error: "Insufficient PM Advance balance" },
-          { status: 400 }
-        )
-      }
-    } else if (resolvedSourceType === "PM_ADVANCE" && !resolvedPmAdvanceId) {
-      return NextResponse.json({ error: "PM Advance ID is required" }, { status: 400 })
-    }
-
-    // Get or create owner association for this unit
-    let ownerAssociation = await prisma.ownerAssociation.findFirst({
-      where: { unitId: note.unitId }
+    const { invoice, expense, invoiceCreated } = await convertAccountingNote({
+      noteId,
+      requestedSourceType: normalizedSourceType,
+      requestedPmAdvanceId: pmAdvanceId ?? null,
+      recordedByUserId: session.user.id
     })
 
-    if (!ownerAssociation) {
-      ownerAssociation = await prisma.ownerAssociation.create({
-        data: {
-          name: `Owner - ${note.unit.name}`,
-          unitId: note.unitId,
-          phone: "",
-          email: ""
-        }
-      })
-    }
-
-    // Create a CLAIM invoice for this note
-    const invoiceNumber = `CLM-${Date.now()}-${note.unit.code}`
-    const invoice = await prisma.invoice.create({
-      data: {
-        invoiceNumber,
-        type: "CLAIM",
-        unitId: note.unitId,
-        ownerAssociationId: ownerAssociation.id,
-        amount: note.amount,
-        remainingBalance: note.amount
-      }
-    })
-
-    // Create operational expense record
-    const expense = await prisma.operationalExpense.create({
-      data: {
-        description: note.description,
-        amount: note.amount,
-        sourceType: resolvedSourceType,
-        unitId: note.unitId,
-        claimInvoiceId: invoice.id,
-        recordedByUserId: session.user.id,
-        pmAdvanceId: resolvedSourceType === "PM_ADVANCE" ? resolvedPmAdvanceId : null
-      }
-    })
-
-    // Deduct from PM Advance if applicable
-    if (resolvedSourceType === "PM_ADVANCE" && resolvedPmAdvanceId) {
-      await prisma.pMAdvance.update({
-        where: { id: resolvedPmAdvanceId },
-        data: {
-          remainingAmount: {
-            decrement: note.amount
-          }
-        }
-      })
-    }
-
-    // Update accounting note status
-    await prisma.accountingNote.update({
-      where: { id: noteId },
-      data: {
-        status: "CONVERTED",
-        convertedToExpenseId: expense.id,
-        convertedAt: new Date(),
-        pmAdvanceId: resolvedSourceType === "PM_ADVANCE" ? resolvedPmAdvanceId : null,
-        sourceType: resolvedSourceType
-      }
-    })
+    const message = invoiceCreated
+      ? "Accounting note recorded successfully. Invoice created."
+      : "Accounting note recorded successfully. Existing invoice updated."
 
     return NextResponse.json({
       success: true,
-      message: "Accounting note recorded successfully. Invoice created.",
+      message,
       invoice,
       expense,
       invoiceNumber: invoice.invoiceNumber
     })
   } catch (error) {
     console.error("Error recording accounting note:", error)
+
+    if (error instanceof AccountingNoteNotFoundError) {
+      return NextResponse.json({ error: "Accounting note not found" }, { status: 404 })
+    }
+
+    if (error instanceof AccountingNoteMissingUnitError) {
+      return NextResponse.json(
+        { error: "Accounting note is missing unit information" },
+        { status: 400 }
+      )
+    }
+
+    if (error instanceof AccountingNotePmAdvanceRequiredError) {
+      return NextResponse.json({ error: "PM Advance ID is required" }, { status: 400 })
+    }
+
+    if (error instanceof AccountingNotePmAdvanceNotFoundError) {
+      return NextResponse.json({ error: "PM Advance not found" }, { status: 404 })
+    }
+
+    if (error instanceof AccountingNotePmAdvanceInsufficientError) {
+      return NextResponse.json(
+        {
+          error: "Insufficient PM Advance balance",
+          remaining: error.remaining,
+          needed: error.needed
+        },
+        { status: 400 }
+      )
+    }
+
+    if (error instanceof AccountingNoteAlreadyProcessedError) {
+      const existing = await prisma.accountingNote.findUnique({
+        where: { id: noteId },
+        include: {
+          convertedToExpense: true
+        }
+      })
+
+      return NextResponse.json(
+        {
+          error: "This note has already been recorded",
+          note: existing
+        },
+        { status: 409 }
+      )
+    }
+
     return NextResponse.json(
       { error: "Failed to record accounting note", details: String(error) },
       { status: 500 }

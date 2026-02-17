@@ -124,6 +124,16 @@ type GenericActionHandler = (
   payload: Record<string, unknown>
 ) => Promise<HandlerResponse>
 
+const SOURCE_TYPE_LABELS: Record<
+  ExpenseSourceType,
+  { en: string; ar: string }
+> = {
+  TECHNICIAN_WORK: { en: "Technician work", ar: "أعمال فنية" },
+  STAFF_WORK: { en: "Staff work", ar: "أعمال موظفين" },
+  ELECTRICITY: { en: "Electricity", ar: "كهرباء" },
+  OTHER: { en: "Other", ar: "مصروفات أخرى" }
+}
+
 type UnitExpenseWithRelations = Prisma.UnitExpenseGetPayload<{
   include: {
     unit: {
@@ -251,6 +261,56 @@ function formatDate(date: Date | null | undefined) {
   } catch {
     return date.toISOString().split("T")[0] ?? null
   }
+}
+
+function toNumericAmount(value: unknown) {
+  if (typeof value === "number") {
+    return value
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+
+  if (value && typeof value === "object" && "toString" in value) {
+    const parsed = Number((value as { toString(): string }).toString())
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+
+  return 0
+}
+
+function formatSourceTypeLabel(type: ExpenseSourceType, locale: "en" | "ar") {
+  const labels = SOURCE_TYPE_LABELS[type]
+  if (!labels) {
+    return type
+  }
+  return locale === "ar" ? labels.ar : labels.en
+}
+
+function buildExpenseLines(
+  expenses: UnitExpenseWithRelations[],
+  locale: "en" | "ar"
+) {
+  return expenses.slice(0, Math.min(expenses.length, 10)).map((expense) => {
+    const unitLabel = expense.unit?.code ?? expense.unit?.name ?? "—"
+    const description = expense.description || (locale === "en" ? "(no description)" : "(بدون وصف)")
+    const amountLabel = formatCurrency(toNumericAmount(expense.amount ?? 0))
+    const sourceLabel = formatSourceTypeLabel(expense.sourceType as ExpenseSourceType, locale)
+    const recordedBy = expense.recordedByUser?.name
+    const recordedByLabel = recordedBy
+      ? recordedBy
+      : locale === "en"
+        ? "unknown"
+        : "غير معروف"
+    const dateLabel = formatDate(expense.date)
+    if (locale === "en") {
+      return `• ${dateLabel ?? "—"} • ${unitLabel} — ${description} • ${amountLabel} (${sourceLabel}) by ${recordedByLabel}`
+    }
+
+    return `• ${dateLabel ?? "—"} • ${unitLabel} — ${description} • ${amountLabel} (${sourceLabel}) بواسطة ${recordedByLabel}`
+  })
 }
 
 async function resolveProjectManager(senderPhone: string) {
@@ -1407,7 +1467,10 @@ async function handleUnitExpensesList(
         take
       })) as UnitExpenseWithRelations[]
 
-  const totalAmount = expenses.reduce((sum, expense) => sum + (expense.amount ?? 0), 0)
+  const totalAmount = expenses.reduce(
+    (sum, expense) => sum + toNumericAmount(expense.amount ?? 0),
+    0
+  )
   const latestExpense = expenses[0]
   const unitCodes = Array.from(
     new Set(
@@ -1423,11 +1486,14 @@ async function handleUnitExpensesList(
       : "project"
   const latestDateLabel = latestExpense ? formatDate(latestExpense.date) : null
   const searchLabel = rawSearchTerm ? ` matching "${rawSearchTerm}"` : ""
+  const detailLinesEn = buildExpenseLines(expenses, "en")
+  const detailLinesAr = buildExpenseLines(expenses, "ar")
+  const remainingCount = Math.max(expenses.length - detailLinesEn.length, 0)
 
   const humanReadable: HumanReadable = expenses.length
     ? {
-        en: `Found ${expenses.length} expenses for ${unit ? `unit ${unitLabel}` : `the project`} totalling ${formatCurrency(totalAmount)}${searchLabel}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "en") : ""}.${latestDateLabel ? ` Latest on ${latestDateLabel}.` : ""}`,
-        ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} لـ ${unit ? `الوحدة ${unitLabel}` : "المشروع"} بإجمالي ${formatCurrency(totalAmount)}${rawSearchTerm ? ` مطابقة لـ "${rawSearchTerm}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "ar") : ""}.${latestDateLabel ? ` آخر مصروف بتاريخ ${latestDateLabel}.` : ""}`
+        en: `Found ${expenses.length} expenses for ${unit ? `unit ${unitLabel}` : `the project`} totalling ${formatCurrency(totalAmount)}${searchLabel}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "en") : ""}.${latestDateLabel ? ` Latest on ${latestDateLabel}.` : ""}${detailLinesEn.length ? `\n${detailLinesEn.join("\n")}` : ""}${remainingCount > 0 ? `\n• (+${remainingCount} more)` : ""}`,
+        ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} لـ ${unit ? `الوحدة ${unitLabel}` : "المشروع"} بإجمالي ${formatCurrency(totalAmount)}${rawSearchTerm ? ` مطابقة لـ "${rawSearchTerm}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "ar") : ""}.${latestDateLabel ? ` آخر مصروف بتاريخ ${latestDateLabel}.` : ""}${detailLinesAr.length ? `\n${detailLinesAr.join("\n")}` : ""}${remainingCount > 0 ? `\n• (+${remainingCount} مصروف إضافي)` : ""}`
       }
     : {
         en: unit

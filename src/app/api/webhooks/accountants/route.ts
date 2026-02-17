@@ -8,6 +8,16 @@ import {
   EXPENSE_SOURCE_TYPES,
   type ExpenseSourceType
 } from "@/lib/expense-search"
+import {
+  convertAccountingNote,
+  AccountingNoteAlreadyProcessedError,
+  AccountingNoteMissingUnitError,
+  AccountingNoteNotFoundError,
+  AccountingNotePmAdvanceInsufficientError,
+  AccountingNotePmAdvanceNotFoundError,
+  AccountingNotePmAdvanceRequiredError,
+  type AccountingNoteWithRelations
+} from "@/lib/accounting-note-conversion"
 import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { buildPhoneVariants } from "@/lib/phone"
 import {
@@ -239,6 +249,41 @@ function formatDate(date: Date | string | null | undefined) {
   } catch {
     return parsed.toISOString().split("T")[0] ?? null
   }
+}
+
+function formatArabicSource(source: string | null | undefined) {
+  if (source === "PM_ADVANCE") {
+    return "عهدة مدير المشروع"
+  }
+
+  return "صندوق المكتب"
+}
+
+function buildArabicConversionSummary(options: {
+  note: AccountingNoteWithRelations
+  invoice: { invoiceNumber?: string | null; remainingBalance?: number | null }
+  expense: { amount: number }
+  invoiceCreated: boolean
+}) {
+  const { note, invoice, expense, invoiceCreated } = options
+  const unitName = note.unit?.name ?? "—"
+  const unitCode = note.unit?.code ? ` (${note.unit.code})` : ""
+  const unitLabel = `${unitName}${unitCode}`
+  const amountText = formatCurrency(expense.amount) ?? String(expense.amount)
+  const remaining = invoice.remainingBalance ?? 0
+  const remainingText = formatCurrency(remaining)
+  const lines = [
+    `الوحدة: ${unitLabel}`,
+    `الوصف: ${note.description ?? "—"}`,
+    `المبلغ: ${amountText} جنيه`,
+    `مصدر التمويل: ${formatArabicSource(note.sourceType)}`,
+    invoiceCreated
+      ? `تم إنشاء فاتورة جديدة برقم ${invoice.invoiceNumber ?? "غير محدد"}`
+      : `تم تحديث الفاتورة الحالية برقم ${invoice.invoiceNumber ?? "غير محدد"}`,
+    `المتبقي على الفاتورة: ${remainingText} جنيه`
+  ]
+
+  return lines.join("\n")
 }
 
 function normalizeInvoice(invoice: any) {
@@ -830,212 +875,163 @@ async function handleRecordAccountingNote(
         success: false,
         error: "Note id is required",
         humanReadable: {
-          en: "Send the accounting note id to record it.",
           ar: "أرسل معرف القيد المحاسبي لتسجيله."
         }
       }
     }
   }
 
-  const note = await db.accountingNote.findUnique({
-    where: { id: noteId },
-    include: {
-      unit: {
-        include: {
-          project: true
-        }
-      },
-      project: true,
-      pmAdvance: true
-    }
-  })
+  const normalizedSourceType = sourceType ?? undefined
 
-  if (!note) {
-    return {
-      status: 404,
-      body: {
-        success: false,
-        error: "Accounting note not found",
-        humanReadable: {
-          en: "I could not find an accounting note with that id.",
-          ar: "لم أعثر على قيد محاسبي بهذا المعرف."
-        }
-      }
-    }
-  }
-
-  if (note.status !== "PENDING") {
+  if (
+    normalizedSourceType &&
+    normalizedSourceType !== "OFFICE_FUND" &&
+    normalizedSourceType !== "PM_ADVANCE"
+  ) {
     return {
       status: 400,
       body: {
         success: false,
-        error: "This note is already processed",
+        error: "Invalid source type",
         humanReadable: {
-          en: "The accounting note was already recorded earlier.",
-          ar: "تم تسجيل هذا القيد مسبقاً."
+          ar: "نوع التمويل غير مدعوم."
         }
       }
     }
   }
 
-  if (!note.unit) {
-    return {
-      status: 400,
-      body: {
-        success: false,
-        error: "Accounting note is missing unit information",
-        humanReadable: {
-          en: "This note has no unit linked to it.",
-          ar: "لا يوجد وحدة مرتبطة بهذا القيد."
-        }
-      }
-    }
-  }
-
-  const resolvedSourceType = sourceType ?? (note.sourceType as "OFFICE_FUND" | "PM_ADVANCE" | null) ?? "OFFICE_FUND"
-  const resolvedPmAdvanceId = pmAdvanceId ?? note.pmAdvanceId ?? null
-
-  if (resolvedSourceType === "PM_ADVANCE" && !resolvedPmAdvanceId) {
-    return {
-      status: 400,
-      body: {
-        success: false,
-        error: "PM advance is required for PM source",
-        humanReadable: {
-          en: "Select which PM advance should fund this expense.",
-          ar: "حدد العهدة التي سيموّل منها هذا المصروف."
-        }
-      }
-    }
-  }
-
-  if (resolvedSourceType === "PM_ADVANCE" && resolvedPmAdvanceId) {
-    const pmAdvance = await db.pMAdvance.findUnique({
-      where: { id: resolvedPmAdvanceId }
+  try {
+    const { note, invoice, expense, invoiceCreated } = await convertAccountingNote({
+      noteId,
+      requestedSourceType: normalizedSourceType,
+      requestedPmAdvanceId: pmAdvanceId ?? null,
+      recordedByUserId: accountant.id
     })
 
-    if (!pmAdvance) {
+    const humanReadableAr = buildArabicConversionSummary({
+      note,
+      invoice,
+      expense,
+      invoiceCreated
+    })
+
+    return {
+      status: 200,
+      body: {
+        success: true,
+        data: {
+          note,
+          invoice,
+          expense
+        },
+        humanReadable: {
+          ar: humanReadableAr
+        }
+      }
+    }
+  } catch (error) {
+    if (error instanceof AccountingNoteNotFoundError) {
+      return {
+        status: 404,
+        body: {
+          success: false,
+          error: "Accounting note not found",
+          humanReadable: {
+            ar: "لم أعثر على قيد محاسبي بهذا المعرف."
+          }
+        }
+      }
+    }
+
+    if (error instanceof AccountingNoteMissingUnitError) {
+      return {
+        status: 400,
+        body: {
+          success: false,
+          error: "Accounting note is missing unit information",
+          humanReadable: {
+            ar: "لا يوجد وحدة مرتبطة بهذا القيد."
+          }
+        }
+      }
+    }
+
+    if (error instanceof AccountingNotePmAdvanceRequiredError) {
+      return {
+        status: 400,
+        body: {
+          success: false,
+          error: "PM advance is required for PM source",
+          humanReadable: {
+            ar: "حدد العهدة التي سيموّل منها هذا المصروف."
+          }
+        }
+      }
+    }
+
+    if (error instanceof AccountingNotePmAdvanceNotFoundError) {
       return {
         status: 404,
         body: {
           success: false,
           error: "PM advance not found",
           humanReadable: {
-            en: "I could not find that PM advance.",
             ar: "لم أعثر على هذه العهدة."
           }
         }
       }
     }
 
-    if (pmAdvance.remainingAmount < note.amount) {
+    if (error instanceof AccountingNotePmAdvanceInsufficientError) {
       return {
         status: 400,
         body: {
           success: false,
           error: "Insufficient PM advance balance",
           issues: {
-            remaining: pmAdvance.remainingAmount,
-            needed: note.amount
+            remaining: error.remaining,
+            needed: error.needed
           },
           humanReadable: {
-            en: "This PM advance does not have enough balance.",
             ar: "العهدة لا تحتوي على رصيد كافٍ."
           }
         }
       }
     }
-  }
 
-  let ownerAssociation = await db.ownerAssociation.findFirst({
-    where: { unitId: note.unitId }
-  })
-
-  if (!ownerAssociation) {
-    ownerAssociation = await db.ownerAssociation.create({
-      data: {
-        name: `Owner - ${note.unit.name}`,
-        unitId: note.unitId,
-        phone: "",
-        email: ""
-      }
-    })
-  }
-
-  const invoiceNumber = `CLM-${Date.now()}-${note.unit.code}`
-
-  const invoice = await db.invoice.create({
-    data: {
-      invoiceNumber,
-      type: "CLAIM",
-      unitId: note.unitId,
-      ownerAssociationId: ownerAssociation.id,
-      amount: note.amount,
-      remainingBalance: note.amount
-    }
-  })
-
-  const expense = await db.operationalExpense.create({
-    data: {
-      description: note.description,
-      amount: note.amount,
-      sourceType: resolvedSourceType,
-      unitId: note.unitId,
-      claimInvoiceId: invoice.id,
-      recordedByUserId: accountant.id,
-      pmAdvanceId: resolvedSourceType === "PM_ADVANCE" ? resolvedPmAdvanceId : null,
-      convertedFromNoteId: note.id
-    }
-  })
-
-  if (resolvedSourceType === "PM_ADVANCE" && resolvedPmAdvanceId) {
-    await db.pMAdvance.update({
-      where: { id: resolvedPmAdvanceId },
-      data: {
-        remainingAmount: {
-          decrement: note.amount
-        }
-      }
-    })
-  }
-
-  await db.accountingNote.update({
-    where: { id: note.id },
-    data: {
-      status: "CONVERTED",
-      convertedAt: new Date(),
-      convertedToExpenseId: expense.id,
-      pmAdvanceId: resolvedSourceType === "PM_ADVANCE" ? resolvedPmAdvanceId : null,
-      sourceType: resolvedSourceType
-    }
-  })
-
-  const refreshedNote = await db.accountingNote.findUnique({
-    where: { id: note.id },
-    include: {
-      convertedToExpense: true,
-      pmAdvance: true,
-      unit: {
+    if (error instanceof AccountingNoteAlreadyProcessedError) {
+      const existing = await db.accountingNote.findUnique({
+        where: { id: noteId },
         include: {
-          project: true
+          convertedToExpense: true
+        }
+      })
+
+      return {
+        status: 409,
+        body: {
+          success: false,
+          error: "This note is already processed",
+          meta: {
+            note: existing
+          },
+          humanReadable: {
+            ar: "تم تسجيل هذا القيد مسبقاً."
+          }
         }
       }
     }
-  })
 
-  return {
-    status: 200,
-    body: {
-      success: true,
-      data: {
-        note: refreshedNote,
-        invoice,
-        expense
-      },
-      message: "Accounting note recorded",
-      humanReadable: {
-        en: "Accounting note converted to an invoice successfully.",
-        ar: "تم تحويل القيد إلى فاتورة بنجاح."
+    console.error("Error converting accounting note via webhook:", error)
+
+    return {
+      status: 500,
+      body: {
+        success: false,
+        error: "Failed to convert accounting note",
+        humanReadable: {
+          ar: "حدث خطأ أثناء تسجيل القيد."
+        }
       }
     }
   }
