@@ -79,7 +79,6 @@ type RequestBody = {
 type ManagerRecord = NonNullable<Awaited<ReturnType<typeof resolveProjectManager>>>
 
 type HumanReadable = {
-  en?: string
   ar?: string
 }
 
@@ -124,14 +123,11 @@ type GenericActionHandler = (
   payload: Record<string, unknown>
 ) => Promise<HandlerResponse>
 
-const SOURCE_TYPE_LABELS: Record<
-  ExpenseSourceType,
-  { en: string; ar: string }
-> = {
-  TECHNICIAN_WORK: { en: "Technician work", ar: "أعمال فنية" },
-  STAFF_WORK: { en: "Staff work", ar: "أعمال موظفين" },
-  ELECTRICITY: { en: "Electricity", ar: "كهرباء" },
-  OTHER: { en: "Other", ar: "مصروفات أخرى" }
+const SOURCE_TYPE_LABELS: Record<ExpenseSourceType, string> = {
+  TECHNICIAN_WORK: "أعمال فنية",
+  STAFF_WORK: "أعمال موظفين",
+  ELECTRICITY: "كهرباء",
+  OTHER: "مصروفات أخرى"
 }
 
 type UnitExpenseWithRelations = Prisma.UnitExpenseGetPayload<{
@@ -199,11 +195,7 @@ function parseDateInput(value: unknown, label: string): Date | null {
   return parsed
 }
 
-function buildDateRangeLabel(
-  fromDate: Date | null,
-  toDate: Date | null,
-  locale: "en" | "ar"
-) {
+function buildDateRangeLabel(fromDate: Date | null, toDate: Date | null) {
   if (!fromDate && !toDate) {
     return ""
   }
@@ -211,26 +203,14 @@ function buildDateRangeLabel(
   const fromLabel = fromDate ? formatDate(fromDate) : null
   const toLabel = toDate ? formatDate(toDate) : null
 
-  if (locale === "en") {
-    if (fromLabel && toLabel) {
-      return ` between ${fromLabel} and ${toLabel}`
-    }
-    if (fromLabel) {
-      return ` since ${fromLabel}`
-    }
-    if (toLabel) {
-      return ` up to ${toLabel}`
-    }
-  } else {
-    if (fromLabel && toLabel) {
-      return ` بين ${fromLabel} و ${toLabel}`
-    }
-    if (fromLabel) {
-      return ` منذ ${fromLabel}`
-    }
-    if (toLabel) {
-      return ` حتى ${toLabel}`
-    }
+  if (fromLabel && toLabel) {
+    return ` بين ${fromLabel} و ${toLabel}`
+  }
+  if (fromLabel) {
+    return ` منذ ${fromLabel}`
+  }
+  if (toLabel) {
+    return ` حتى ${toLabel}`
   }
 
   return ""
@@ -281,34 +261,19 @@ function toNumericAmount(value: unknown) {
   return 0
 }
 
-function formatSourceTypeLabel(type: ExpenseSourceType, locale: "en" | "ar") {
-  const labels = SOURCE_TYPE_LABELS[type]
-  if (!labels) {
-    return type
-  }
-  return locale === "ar" ? labels.ar : labels.en
+function formatSourceTypeLabel(type: ExpenseSourceType) {
+  return SOURCE_TYPE_LABELS[type] ?? type
 }
 
-function buildExpenseLines(
-  expenses: UnitExpenseWithRelations[],
-  locale: "en" | "ar"
-) {
+function buildExpenseLines(expenses: UnitExpenseWithRelations[]) {
   return expenses.slice(0, Math.min(expenses.length, 10)).map((expense) => {
     const unitLabel = expense.unit?.code ?? expense.unit?.name ?? "—"
-    const description = expense.description || (locale === "en" ? "(no description)" : "(بدون وصف)")
+    const description = expense.description || "(بدون وصف)"
     const amountLabel = formatCurrency(toNumericAmount(expense.amount ?? 0))
-    const sourceLabel = formatSourceTypeLabel(expense.sourceType as ExpenseSourceType, locale)
+    const sourceLabel = formatSourceTypeLabel(expense.sourceType as ExpenseSourceType)
     const recordedBy = expense.recordedByUser?.name
-    const recordedByLabel = recordedBy
-      ? recordedBy
-      : locale === "en"
-        ? "unknown"
-        : "غير معروف"
+    const recordedByLabel = recordedBy ?? "غير معروف"
     const dateLabel = formatDate(expense.date)
-    if (locale === "en") {
-      return `• ${dateLabel ?? "—"} • ${unitLabel} — ${description} • ${amountLabel} (${sourceLabel}) by ${recordedByLabel}`
-    }
-
     return `• ${dateLabel ?? "—"} • ${unitLabel} — ${description} • ${amountLabel} (${sourceLabel}) بواسطة ${recordedByLabel}`
   })
 }
@@ -374,7 +339,6 @@ async function handleCreateOperationalExpense(
         error: "Missing or invalid fields for operational expense",
         projectId: projectId || null,
         humanReadable: {
-          en: "I could not record the expense because some fields are missing or invalid.",
           ar: "لم أستطع تسجيل المصروف لأن بعض البيانات ناقصة أو غير صحيحة."
         },
         suggestions: [
@@ -398,7 +362,6 @@ async function handleCreateOperationalExpense(
         error: "Invalid sourceType. Use OFFICE_FUND or PM_ADVANCE",
         projectId,
         humanReadable: {
-          en: "The expense source must be OFFICE_FUND or PM_ADVANCE.",
           ar: "المصدر يجب أن يكون OFFICE_FUND أو PM_ADVANCE."
         },
         suggestions: [
@@ -424,7 +387,6 @@ async function handleCreateOperationalExpense(
         error: "Project not found",
         projectId,
         humanReadable: {
-          en: "I could not find this project, so the expense was not recorded.",
           ar: "لم أجد هذا المشروع لذلك لم يتم تسجيل المصروف."
         },
         suggestions: [
@@ -448,7 +410,6 @@ async function handleCreateOperationalExpense(
         error: "Project manager is not assigned to this project",
         projectId,
         humanReadable: {
-          en: "You are not assigned to this project, so I stopped the expense.",
           ar: "أنت غير مكلّف بهذا المشروع لذلك أوقفت تسجيل المصروف."
         },
         suggestions: [
@@ -500,8 +461,8 @@ async function handleCreateOperationalExpense(
         issues: { unitCode },
         humanReadable: {
           ar: hasAvailableUnits
-            ? `مش لاقي وحدة بالكود ده في المشروع. دي الوحدات المتاحة عندي:\n${formattedUnitsList}`
-            : "مش لاقي وحدة بالكود ده في المشروع."
+            ? `مش لاقي وحدة بالكود ${unitCode} في المشروع. دي الوحدات المتاحة عندي:\n${formattedUnitsList}`
+            : `مش لاقي وحدة بالكود ${unitCode} في المشروع.`
         },
         suggestions: [
           {
@@ -533,7 +494,6 @@ async function handleCreateOperationalExpense(
           projectId,
           issues: { sourceType },
           humanReadable: {
-            en: "Please specify which PM advance should fund this expense.",
             ar: "من فضلك حدد أي مقدم خاص بالمدير سيموّل هذا المصروف."
           },
           suggestions: [
@@ -563,7 +523,6 @@ async function handleCreateOperationalExpense(
           projectId,
           issues: { pmAdvanceId },
           humanReadable: {
-            en: "I could not find the referenced PM advance entry.",
             ar: "تعذر العثور على المقدم المحدد."
           },
           suggestions: [
@@ -588,7 +547,6 @@ async function handleCreateOperationalExpense(
           projectId,
           issues: { pmAdvanceProjectId: pmAdvance.projectId },
           humanReadable: {
-            en: "That PM advance is linked to another project.",
             ar: "هذا المقدم مرتبط بمشروع آخر."
           },
           suggestions: [
@@ -617,7 +575,6 @@ async function handleCreateOperationalExpense(
             requested: numericAmount
           },
           humanReadable: {
-            en: `The PM advance has ${formatCurrency(pmAdvance.remainingAmount)} remaining, which is less than the requested amount ${formatCurrency(numericAmount)}.`,
             ar: `المتبقي في المقدم ${formatCurrency(pmAdvance.remainingAmount)} وهو أقل من المطلوب ${formatCurrency(numericAmount)}.`
           },
           suggestions: [
@@ -651,7 +608,6 @@ async function handleCreateOperationalExpense(
           projectId,
           issues: { recordedAt },
           humanReadable: {
-            en: "The recorded date is invalid. Please use an ISO format like 2024-05-01.",
             ar: "تاريخ التسجيل غير صالح. استخدم صيغة مثل 2024-05-01."
           },
           suggestions: [
@@ -709,12 +665,10 @@ async function handleCreateOperationalExpense(
     ? `${accountingNote.unit.code} • ${accountingNote.unit.name}`
     : accountingNote.unit.code
   const projectName = accountingNote.project?.name ?? accountingNote.unit.project?.name ?? null
-  const sourceLabelEn = sourceType === "PM_ADVANCE" ? "PM advance" : "office fund"
   const sourceLabelAr = sourceType === "PM_ADVANCE" ? "مقدم المدير" : "خزنة المكتب"
   const recordedDateLabel = formatDate(recordedAtDate ?? accountingNote.createdAt)
 
   const humanReadable: HumanReadable = {
-    en: `Created an accounting note for ${amountLabel} on unit ${unitDisplay}${projectName ? ` in project ${projectName}` : ""} from the ${sourceLabelEn}. Waiting for accountant review${recordedDateLabel ? ` (submitted ${recordedDateLabel})` : ""}.`,
     ar: `تم إنشاء مذكرة محاسبية بقيمة ${amountLabel} للوحدة ${unitDisplay}${projectName ? ` ضمن مشروع ${projectName}` : ""} من ${sourceLabelAr}. بانتظار مراجعة المحاسب${recordedDateLabel ? ` (أُرسلت ${recordedDateLabel})` : ""}.`
   }
 
@@ -763,7 +717,6 @@ async function handleResidentLookup(
         error: "projectId and unitCode are required",
         projectId: projectId || null,
         humanReadable: {
-          en: "Please include both the project ID and the unit code so I can locate the residents.",
           ar: "من فضلك أرسل رقم المشروع وكود الوحدة حتى أستطيع العثور على السكان."
         },
         suggestions: [
@@ -787,7 +740,6 @@ async function handleResidentLookup(
         error: "Project manager is not assigned to this project",
         projectId,
         humanReadable: {
-          en: "You are not assigned to this project, so I cannot share its residents.",
           ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني مشاركة بيانات سكانه."
         },
         suggestions: [
@@ -816,7 +768,6 @@ async function handleResidentLookup(
         projectId,
         issues: { unitCode },
         humanReadable: {
-          en: "I could not find a unit with that code inside the project.",
           ar: "لم أجد وحدة بهذا الكود داخل المشروع."
         },
         suggestions: [
@@ -859,11 +810,9 @@ async function handleResidentLookup(
   const firstResident = residents[0]
   const humanReadable: HumanReadable = residents.length
     ? {
-        en: `Found ${residents.length} resident${residents.length === 1 ? "" : "s"} in unit ${unitCode}: ${namesSample.join(", ")}.`,
         ar: `تم العثور على ${residents.length} من السكان في الوحدة ${unitCode}: ${namesSample.join("، ")}.`
       }
     : {
-        en: `No residents matched unit ${unitCode}.`,
         ar: `لم يتم العثور على سكان للوحدة ${unitCode}.`
       }
 
@@ -932,7 +881,6 @@ async function handleTicketSummary(
         error: "projectId is required",
         projectId: null,
         humanReadable: {
-          en: "I need the project ID to check its tickets.",
           ar: "أحتاج رقم المشروع لمراجعة التذاكر الخاصة به."
         },
         suggestions: [
@@ -953,7 +901,6 @@ async function handleTicketSummary(
         error: "Project manager is not assigned to this project",
         projectId,
         humanReadable: {
-          en: "You are not assigned to this project, so I cannot share the tickets.",
           ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني مشاركة التذاكر الخاصة به."
         },
         suggestions: [
@@ -1016,11 +963,9 @@ async function handleTicketSummary(
 
   const humanReadable: HumanReadable = tickets.length
     ? {
-        en: `Found ${tickets.length} tickets for ${scopeLabel} (${filteredStatusesLabel}). NEW: ${statusCounts.NEW}, IN_PROGRESS: ${statusCounts.IN_PROGRESS}, DONE: ${statusCounts.DONE}.`,
         ar: `تم العثور على ${tickets.length} تذكرة لـ ${unitCode ? `الوحدة ${unitCode}` : "جميع الوحدات"} (${filteredStatusesLabel}). جديد: ${statusCounts.NEW}، قيد التنفيذ: ${statusCounts.IN_PROGRESS}، منجز: ${statusCounts.DONE}.`
       }
     : {
-        en: `No tickets matched the filters for ${scopeLabel}.`,
         ar: `لا توجد تذاكر مطابقة للمحددات لـ ${unitCode ? `الوحدة ${unitCode}` : "المشروع"}.`
       }
 
@@ -1086,7 +1031,6 @@ async function handleProjectUnitsList(
         error: "projectId is required",
         projectId: null,
         humanReadable: {
-          en: "I need the project ID to list its units.",
           ar: "أحتاج رقم المشروع حتى أستعرض وحداته."
         },
         suggestions: [
@@ -1107,7 +1051,6 @@ async function handleProjectUnitsList(
         error: "Project manager is not assigned to this project",
         projectId,
         humanReadable: {
-          en: "You are not assigned to this project, so I cannot show its units.",
           ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني عرض وحداته."
         },
         suggestions: [
@@ -1173,13 +1116,9 @@ async function handleProjectUnitsList(
 
   const humanReadable: HumanReadable = units.length
     ? {
-        en: `Found ${units.length} units${includeInactive ? " (including inactive)" : ""}${searchLabel}. ${activeUnits} active.`,
         ar: `تم العثور على ${units.length} وحدة${includeInactive ? " (بما فيها المتوقفة)" : ""}${normalizedSearch ? ` مطابقة لـ "${normalizedSearch}"` : ""}. ${activeUnits} نشطة.`
       }
     : {
-        en: normalizedSearch
-          ? `No units matched "${normalizedSearch}" in this project.`
-          : "No units found for this project.",
         ar: normalizedSearch
           ? `لا توجد وحدات مطابقة لـ "${normalizedSearch}" في هذا المشروع.`
           : "لم يتم العثور على وحدات لهذا المشروع."
@@ -1260,7 +1199,6 @@ async function handleUnitExpensesList(
         error: "projectId is required",
         projectId: null,
         humanReadable: {
-          en: "I need the project ID to list its expenses.",
           ar: "أحتاج رقم المشروع حتى أستعرض المصروفات."
         },
         suggestions: [
@@ -1281,7 +1219,6 @@ async function handleUnitExpensesList(
         error: "Project manager is not assigned to this project",
         projectId,
         humanReadable: {
-          en: "You are not assigned to this project, so I cannot show its expenses.",
           ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني عرض مصروفاته."
         },
         suggestions: [
@@ -1321,7 +1258,6 @@ async function handleUnitExpensesList(
           projectId,
           issues: { unitCode },
           humanReadable: {
-            en: "I could not find that unit inside the project, so there are no expenses to show.",
             ar: "لم أجد هذه الوحدة داخل المشروع، لذلك لا توجد مصروفات أعرضها."
           },
           suggestions: [
@@ -1385,7 +1321,6 @@ async function handleUnitExpensesList(
         error: (error as Error).message,
         projectId,
         humanReadable: {
-          en: "The date filter is invalid. Use YYYY-MM-DD format.",
           ar: "تصفية التاريخ غير صحيحة. استخدم صيغة YYYY-MM-DD."
         }
       }
@@ -1401,7 +1336,6 @@ async function handleUnitExpensesList(
         projectId,
         issues: { fromDate, toDate },
         humanReadable: {
-          en: "The start date must be before the end date.",
           ar: "تاريخ البداية يجب أن يكون قبل تاريخ النهاية."
         }
       }
@@ -1503,31 +1437,19 @@ async function handleUnitExpensesList(
     )
   )
   const unitLabel = unit
-    ? unit.code ?? "unit"
+    ? unit.code ?? "الوحدة"
     : unitCodes.length
-      ? `${unitCodes.length} units`
-      : "project"
+      ? `${unitCodes.length} وحدات`
+      : "المشروع"
   const latestDateLabel = latestExpense ? formatDate(latestExpense.date) : null
-  const searchLabel = rawSearchTerm ? ` matching "${rawSearchTerm}"` : ""
-  const detailLinesEn = buildExpenseLines(expenses, "en")
-  const detailLinesAr = buildExpenseLines(expenses, "ar")
-  const remainingCount = Math.max(expenses.length - detailLinesEn.length, 0)
+  const detailLines = buildExpenseLines(expenses)
+  const remainingCount = Math.max(expenses.length - detailLines.length, 0)
 
   const humanReadable: HumanReadable = expenses.length
     ? {
-        en: `Found ${expenses.length} expenses for ${unit ? `unit ${unitLabel}` : `the project`} totalling ${formatCurrency(totalAmount)}${searchLabel}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "en") : ""}.${latestDateLabel ? ` Latest on ${latestDateLabel}.` : ""}${detailLinesEn.length ? `\n${detailLinesEn.join("\n")}` : ""}${remainingCount > 0 ? `\n• (+${remainingCount} more)` : ""}`,
-        ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} لـ ${unit ? `الوحدة ${unitLabel}` : "المشروع"} بإجمالي ${formatCurrency(totalAmount)}${rawSearchTerm ? ` مطابقة لـ "${rawSearchTerm}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue, "ar") : ""}.${latestDateLabel ? ` آخر مصروف بتاريخ ${latestDateLabel}.` : ""}${detailLinesAr.length ? `\n${detailLinesAr.join("\n")}` : ""}${remainingCount > 0 ? `\n• (+${remainingCount} مصروف إضافي)` : ""}`
+        ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} لـ ${unit ? `الوحدة ${unitLabel}` : "المشروع"} بإجمالي ${formatCurrency(totalAmount)}${rawSearchTerm ? ` مطابقة لـ "${rawSearchTerm}"` : ""}${fromDateValue || toDateValue ? buildDateRangeLabel(fromDateValue, toDateValue) : ""}.${latestDateLabel ? ` آخر مصروف بتاريخ ${latestDateLabel}.` : ""}${detailLines.length ? `\n${detailLines.join("\n")}` : ""}${remainingCount > 0 ? `\n• (+${remainingCount} مصروف إضافي)` : ""}`
       }
     : {
-        en: unit
-          ? rawSearchTerm
-            ? `No expenses matched "${rawSearchTerm}" for unit ${unitLabel}.`
-            : `No expenses recorded yet for unit ${unitLabel}.`
-          : rawSearchTerm
-            ? `No expenses matched "${rawSearchTerm}" for this project.`
-            : fromDateValue || toDateValue
-              ? "No expenses found for the selected date range."
-              : "No expenses recorded yet for this project.",
         ar: unit
           ? rawSearchTerm
             ? `لا توجد مصروفات مطابقة لـ "${rawSearchTerm}" للوحدة ${unitLabel}.`
@@ -1536,7 +1458,7 @@ async function handleUnitExpensesList(
             ? `لا توجد مصروفات مطابقة لـ "${rawSearchTerm}" لهذا المشروع.`
             : fromDateValue || toDateValue
               ? "لا توجد مصروفات في نطاق التاريخ المحدد."
-              : "لا توجد مصروفات مسجلة لهذا المشروع."
+                    : "لا توجد مصروفات مسجلة لهذا المشروع."
       }
 
   const suggestions: Suggestion[] = expenses.length
@@ -1644,7 +1566,6 @@ async function handleLastElectricityTopup(
         error: "projectId is required",
         projectId: null,
         humanReadable: {
-          en: "I need the project ID to check electricity top-ups.",
           ar: "أحتاج رقم المشروع حتى أتحقق من آخر شحن كهرباء."
         },
         suggestions: [
@@ -1665,7 +1586,6 @@ async function handleLastElectricityTopup(
         error: "Project manager is not assigned to this project",
         projectId,
         humanReadable: {
-          en: "You are not assigned to this project, so I cannot show its electricity top-ups.",
           ar: "أنت غير مكلّف بهذا المشروع لذلك لا يمكنني عرض شحنات الكهرباء الخاصة به."
         },
         suggestions: [
@@ -1705,7 +1625,6 @@ async function handleLastElectricityTopup(
           projectId,
           issues: { unitCode },
           humanReadable: {
-            en: "I could not find that unit inside the project, so I cannot check its electricity top-ups.",
             ar: "لم أجد هذه الوحدة داخل المشروع، لذلك لا أستطيع التحقق من شحن كهربائها."
           },
           suggestions: [
@@ -1750,13 +1669,9 @@ async function handleLastElectricityTopup(
 
   const humanReadable: HumanReadable = topup
     ? {
-        en: `Last electricity top-up was ${formatCurrency(topup.amount)} on ${formatDate(topup.date)} for unit ${topup.unit?.code ?? "unknown"}.`,
         ar: `آخر شحن كهرباء كان بقيمة ${formatCurrency(topup.amount)} بتاريخ ${formatDate(topup.date)} للوحدة ${topup.unit?.code ?? "غير معروف"}.`
       }
     : {
-        en: unit
-          ? `No electricity top-ups recorded yet for unit ${unit.code}.`
-          : "No electricity top-ups recorded yet for this project.",
         ar: unit
           ? `لا توجد شحنات كهرباء مسجلة للوحدة ${unit.code}.`
           : "لا توجد شحنات كهرباء مسجلة لهذا المشروع."

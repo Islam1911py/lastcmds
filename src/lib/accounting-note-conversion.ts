@@ -117,16 +117,68 @@ export async function convertAccountingNote({
   const { invoice, expense, invoiceCreated } = await db.$transaction(async (tx) => {
     let invoiceCreatedFlag = false
 
-    let invoiceRecord = await tx.invoice.findFirst({
+    const openInvoices = await tx.invoice.findMany({
       where: {
         unitId: note.unitId,
         type: "CLAIM",
-        isPaid: false
+        remainingBalance: {
+          gt: 0
+        }
       },
       orderBy: {
-        issuedAt: "desc"
+        issuedAt: "asc"
       }
     })
+
+    let invoiceRecord = openInvoices[0] ?? null
+
+    if (invoiceRecord && openInvoices.length > 1) {
+      const duplicates = openInvoices.slice(1)
+      let amountIncrementFromDuplicates = 0
+      let paidIncrementFromDuplicates = 0
+      let balanceIncrementFromDuplicates = 0
+
+      for (const duplicate of duplicates) {
+        amountIncrementFromDuplicates += duplicate.amount
+        paidIncrementFromDuplicates += duplicate.totalPaid
+        balanceIncrementFromDuplicates += duplicate.remainingBalance
+
+        await tx.operationalExpense.updateMany({
+          where: { claimInvoiceId: duplicate.id },
+          data: { claimInvoiceId: invoiceRecord.id }
+        })
+
+        await tx.unitExpense.updateMany({
+          where: { claimInvoiceId: duplicate.id },
+          data: { claimInvoiceId: invoiceRecord.id }
+        })
+
+        await tx.payment.updateMany({
+          where: { invoiceId: duplicate.id },
+          data: { invoiceId: invoiceRecord.id }
+        })
+
+        await tx.invoice.delete({ where: { id: duplicate.id } })
+      }
+
+      if (amountIncrementFromDuplicates !== 0 || paidIncrementFromDuplicates !== 0 || balanceIncrementFromDuplicates !== 0) {
+        invoiceRecord = await tx.invoice.update({
+          where: { id: invoiceRecord.id },
+          data: {
+            amount: {
+              increment: amountIncrementFromDuplicates
+            },
+            totalPaid: {
+              increment: paidIncrementFromDuplicates
+            },
+            remainingBalance: {
+              increment: balanceIncrementFromDuplicates
+            },
+            isPaid: false
+          }
+        })
+      }
+    }
 
     if (invoiceRecord) {
       invoiceRecord = await tx.invoice.update({

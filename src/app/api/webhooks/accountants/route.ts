@@ -129,7 +129,6 @@ type RequestBody = {
 type AccountantRecord = NonNullable<Awaited<ReturnType<typeof resolveAccountant>>>
 
 type HumanReadable = {
-  en?: string
   ar?: string
 }
 
@@ -383,7 +382,6 @@ async function handleCreatePmAdvance(
         success: false,
         error: "Missing or invalid fields for PM advance",
         humanReadable: {
-          en: "Please send a positive amount for the PM advance.",
           ar: "من فضلك أرسل قيمة موجبة لتسجيل العهدة."
         }
       }
@@ -406,9 +404,6 @@ async function handleCreatePmAdvance(
         success: false,
         error: notFound ? "Staff member not found" : "Staff match requires confirmation",
         humanReadable: {
-          en: notFound
-            ? "I could not find a staff member matching that description."
-            : "I found multiple staff members; please confirm which one should receive the PM advance.",
           ar: notFound
             ? "لم أعثر على موظف مطابق للوصف."
             : "وجدت أكثر من موظف مطابق، من فضلك حدد الموظف المطلوب لتسجيل العهدة."
@@ -450,7 +445,6 @@ async function handleCreatePmAdvance(
           success: false,
           error: "Project not found",
           humanReadable: {
-            en: "The specified project does not exist.",
             ar: "المشروع المحدد غير موجود."
           }
         }
@@ -483,7 +477,6 @@ async function handleCreatePmAdvance(
       data: advance,
       message: "PM advance created",
       humanReadable: {
-        en: `Advance of ${formatCurrency(advance.amount)} recorded successfully.`,
         ar: `تم تسجيل عهدة بقيمة ${formatCurrency(advance.amount)} بنجاح.`
       },
       meta: {
@@ -508,7 +501,6 @@ async function handleCreateStaffAdvance(
         success: false,
         error: "Missing or invalid fields for staff advance",
         humanReadable: {
-          en: "A positive amount is required to create a staff advance.",
           ar: "القيمة يجب أن تكون موجبة لتسجيل سلفة الموظف."
         }
       }
@@ -531,9 +523,6 @@ async function handleCreateStaffAdvance(
         success: false,
         error: notFound ? "Staff member not found" : "Staff match requires confirmation",
         humanReadable: {
-          en: notFound
-            ? "I could not find a staff member matching that description."
-            : "I found multiple staff members; please confirm who should receive the advance.",
           ar: notFound
             ? "لم أعثر على موظف مطابق للوصف."
             : "وجدت أكثر من موظف مطابق، من فضلك حدد الموظف الذي تُصرف له السلفة."
@@ -594,7 +583,6 @@ async function handleCreateStaffAdvance(
       data: advance,
       message: "Staff advance created",
       humanReadable: {
-        en: `Staff advance of ${formatCurrency(advance.amount)} recorded successfully.`,
         ar: `تم تسجيل سلفة بقيمة ${formatCurrency(advance.amount)} بنجاح.`
       },
       meta: {
@@ -618,7 +606,6 @@ async function handleUpdateStaffAdvance(
         success: false,
         error: "Advance id is required",
         humanReadable: {
-          en: "Please send the advance id to update it.",
           ar: "من فضلك أرسل معرف السلفة لتعديلها."
         }
       }
@@ -632,7 +619,6 @@ async function handleUpdateStaffAdvance(
         success: false,
         error: "No changes provided",
         humanReadable: {
-          en: "Send a new amount or note to update the advance.",
           ar: "أرسل قيمة أو ملاحظة جديدة لتعديل السلفة."
         }
       }
@@ -659,7 +645,6 @@ async function handleUpdateStaffAdvance(
         success: false,
         error: "Advance not found",
         humanReadable: {
-          en: "I could not find a staff advance with that id.",
           ar: "لم أعثر على سلفة بهذا المعرف."
         },
         meta: queryResolution
@@ -678,7 +663,6 @@ async function handleUpdateStaffAdvance(
         success: false,
         error: "Only pending advances can be edited",
         humanReadable: {
-          en: "This advance is already deducted and cannot be edited.",
           ar: "هذه السلفة تم خصمها ولا يمكن تعديلها."
         }
       }
@@ -704,7 +688,6 @@ async function handleUpdateStaffAdvance(
           success: false,
           error: "Amount must be a positive number",
           humanReadable: {
-            en: "Use a positive number for the advance amount.",
             ar: "القيمة يجب أن تكون رقماً موجباً."
           },
           meta: {
@@ -747,7 +730,6 @@ async function handleUpdateStaffAdvance(
       data: updatedAdvance,
       message: "Staff advance updated",
       humanReadable: {
-        en: "Staff advance updated successfully.",
         ar: "تم تعديل السلفة بنجاح."
       },
       meta: {
@@ -771,7 +753,6 @@ async function handleDeleteStaffAdvance(
         success: false,
         error: "Advance id is required",
         humanReadable: {
-          en: "Please send the advance id to delete it.",
           ar: "من فضلك أرسل معرف السلفة لحذفها."
         }
       }
@@ -793,7 +774,6 @@ async function handleDeleteStaffAdvance(
         success: false,
         error: "Advance not found",
         humanReadable: {
-          en: "I could not find a staff advance with that id.",
           ar: "لم أعثر على سلفة بهذا المعرف."
         },
         meta: queryResolution
@@ -812,7 +792,6 @@ async function handleDeleteStaffAdvance(
         success: false,
         error: "Cannot delete deducted advances",
         humanReadable: {
-          en: "This advance is already deducted and cannot be removed.",
           ar: "هذه السلفة تم خصمها ولا يمكن حذفها."
         },
         meta: queryResolution
@@ -851,7 +830,6 @@ async function handleDeleteStaffAdvance(
       data: { advanceId },
       message: "Staff advance deleted",
       humanReadable: {
-        en: "Staff advance deleted successfully.",
         ar: "تم حذف السلفة بنجاح."
       },
       meta: {
@@ -1050,7 +1028,6 @@ async function handleSearchStaff(
         success: false,
         error: "Search query is required",
         humanReadable: {
-          en: "Send a name or part of a name to search for staff.",
           ar: "أرسل اسم أو جزء من اسم للبحث عن الموظفين."
         }
       }
@@ -1078,11 +1055,9 @@ async function handleSearchStaff(
       message: matches.length ? "Staff search completed" : "No staff matched the query",
       humanReadable: matches.length
         ? {
-            en: `Found ${matches.length} staff${matches.length === 1 ? "" : " members"} matching the query.`,
             ar: `تم العثور على ${matches.length} موظف${matches.length === 1 ? "" : "ين"} مطابقين للبحث.`
           }
         : {
-            en: "No staff matched the provided name.",
             ar: "لا يوجد موظفون مطابقون للاسم المرسل."
           },
       meta: {
@@ -1125,7 +1100,6 @@ async function handleListStaffAdvances(
           },
           message: "No staff advances found",
           humanReadable: {
-            en: "No staff advances matched the provided filters.",
             ar: "لا توجد سلف للموظفين مطابقة للمحددات."
           },
           meta: {
@@ -1238,11 +1212,9 @@ async function handleListStaffAdvances(
       },
       humanReadable: items.length
         ? {
-            en: `Found ${items.length} staff advances totalling ${formatCurrency(totalAmount)}.`,
             ar: `تم العثور على ${items.length} سلفة بإجمالي ${formatCurrency(totalAmount)}.`
           }
         : {
-            en: "No staff advances matched the filters.",
             ar: "لا توجد سلف مطابقة للمحددات."
           },
       meta: {
@@ -1429,11 +1401,9 @@ async function handleSearchAccountingNotes(
       },
       humanReadable: items.length
         ? {
-            en: `Found ${items.length} accounting notes totalling ${formatCurrency(totalAmount)}.`,
             ar: `تم العثور على ${items.length} قيود محاسبية بإجمالي ${formatCurrency(totalAmount)}.`
           }
         : {
-            en: "No accounting notes matched the filters.",
             ar: "لا توجد قيود محاسبية مطابقة للمحددات."
           },
       meta: {
@@ -1481,7 +1451,6 @@ async function handlePayInvoice(
         success: false,
         error: "Invoice id is required",
         humanReadable: {
-          en: "Send the invoice id to record a payment.",
           ar: "أرسل معرف الفاتورة لتسجيل الدفع."
         }
       }
@@ -1499,7 +1468,6 @@ async function handlePayInvoice(
         success: false,
         error: "Invoice not found",
         humanReadable: {
-          en: "I could not find an invoice with that id.",
           ar: "لم أعثر على فاتورة بهذا المعرف."
         }
       }
@@ -1518,7 +1486,6 @@ async function handlePayInvoice(
         success: false,
         error: "Payment amount is required",
         humanReadable: {
-          en: "Send how much was paid towards the invoice.",
           ar: "أرسل المبلغ المدفوع للفاتورة."
         }
       }
@@ -1532,7 +1499,6 @@ async function handlePayInvoice(
         success: false,
         error: "Invalid payment amount",
         humanReadable: {
-          en: "Payment amount must be a positive number.",
           ar: "المبلغ المدفوع يجب أن يكون رقماً موجباً."
         }
       }
@@ -1545,8 +1511,11 @@ async function handlePayInvoice(
       body: {
         success: false,
         error: "Payment exceeds remaining balance",
+        issues: {
+          paymentAmount,
+          remainingBalance: invoice.remainingBalance
+        },
         humanReadable: {
-          en: "The payment is larger than the remaining balance.",
           ar: "المبلغ المدفوع أكبر من الرصيد المتبقي."
         }
       }
@@ -1624,7 +1593,6 @@ async function handlePayInvoice(
       data: normalizeInvoice(refreshed),
       message: "Invoice payment recorded",
       humanReadable: {
-        en: "Invoice payment captured successfully.",
         ar: "تم تسجيل دفعة الفاتورة بنجاح."
       }
     }
@@ -1644,7 +1612,6 @@ async function handleCreatePayroll(
         success: false,
         error: "Month is required",
         humanReadable: {
-          en: "Send the payroll month in YYYY-MM format.",
           ar: "أرسل شهر المرتبات بصيغة YYYY-MM."
         }
       }
@@ -1662,7 +1629,6 @@ async function handleCreatePayroll(
         success: false,
         error: "Payroll already exists",
         humanReadable: {
-          en: "There is already a payroll for that month.",
           ar: "يوجد كشف رواتب لهذا الشهر بالفعل."
         }
       }
@@ -1686,7 +1652,6 @@ async function handleCreatePayroll(
         success: false,
         error: "No staff members found",
         humanReadable: {
-          en: "No staff members are registered to build the payroll.",
           ar: "لا يوجد موظفون مسجلون لإنشاء كشف الرواتب."
         }
       }
@@ -1743,7 +1708,6 @@ async function handleCreatePayroll(
       data: payroll,
       message: "Payroll generated",
       humanReadable: {
-        en: "Payroll created and awaiting payment.",
         ar: "تم إنشاء كشف الرواتب وجاهز للدفع."
       }
     }
@@ -1763,7 +1727,6 @@ async function handlePayPayroll(
         success: false,
         error: "Payroll id is required",
         humanReadable: {
-          en: "Send the payroll id to mark it as paid.",
           ar: "أرسل معرف كشف الرواتب لتأكيد الدفع."
         }
       }
@@ -1784,7 +1747,6 @@ async function handlePayPayroll(
         success: false,
         error: "Payroll not found",
         humanReadable: {
-          en: "I could not find a payroll with that id.",
           ar: "لم أعثر على كشف رواتب بهذا المعرف."
         }
       }
@@ -1798,7 +1760,6 @@ async function handlePayPayroll(
         success: false,
         error: "Payroll is already processed",
         humanReadable: {
-          en: "This payroll was already marked as paid earlier.",
           ar: "تم دفع هذا الكشف مسبقاً."
         }
       }
@@ -1849,7 +1810,6 @@ async function handlePayPayroll(
       data: updatedPayroll,
       message: "Payroll marked as paid",
       humanReadable: {
-        en: "Payroll paid and pending advances deducted.",
         ar: "تم دفع كشف الرواتب وخصم السلف المعلقة."
       }
     }
@@ -1880,7 +1840,6 @@ async function handleListUnitExpenses(
           success: false,
           error: "Project not found",
           humanReadable: {
-            en: "I could not find the requested project to list its expenses.",
             ar: "لم أجد المشروع المطلوب لعرض مصروفاته."
           }
         }
@@ -1911,7 +1870,6 @@ async function handleListUnitExpenses(
           success: false,
           error: "Operational unit not found",
           humanReadable: {
-            en: "I could not find that unit while preparing the expense list.",
             ar: "لم أجد هذه الوحدة أثناء تحضير قائمة المصروفات."
           },
           issues: {
@@ -1969,7 +1927,6 @@ async function handleListUnitExpenses(
         success: false,
         error: (error as Error).message,
         humanReadable: {
-          en: "The date filter is invalid. Use YYYY-MM-DD format.",
           ar: "تصفية التاريخ غير صحيحة. استخدم صيغة YYYY-MM-DD."
         }
       }
@@ -1983,7 +1940,6 @@ async function handleListUnitExpenses(
         success: false,
         error: "fromDate must be before toDate",
         humanReadable: {
-          en: "The start date must be before the end date.",
           ar: "تاريخ البداية يجب أن يكون قبل تاريخ النهاية."
         }
       }
@@ -2109,11 +2065,9 @@ async function handleListUnitExpenses(
 
   const humanReadable: HumanReadable = expenses.length
     ? {
-        en: `Found ${expenses.length} unit expenses for ${projectLabel}${unitLabel ? ` (unit ${unitLabel})` : ""} totalling ${formatCurrency(totalAmount)}.`,
         ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} للوحدات ضمن ${projectLabel}${unitLabel ? ` (الوحدة ${unitLabel})` : ""} بإجمالي ${formatCurrency(totalAmount)}.`
       }
     : {
-        en: "No unit expenses matched the requested filters.",
         ar: "لا توجد مصروفات وحدات مطابقة للمحددات."
       }
 
@@ -2307,7 +2261,6 @@ export async function POST(req: NextRequest) {
       success: false,
       error: "Accountant not recognized",
       humanReadable: {
-        en: "The WhatsApp number is not linked to an accountant user.",
         ar: "رقم الواتساب غير مرتبط بحساب محاسب."
       }
     }
@@ -2341,7 +2294,6 @@ export async function POST(req: NextRequest) {
         success: false,
         error: "Internal server error",
         humanReadable: {
-          en: "Something went wrong while processing the accountant action.",
           ar: "حدث خطأ أثناء تنفيذ طلب المحاسب."
         }
       }
