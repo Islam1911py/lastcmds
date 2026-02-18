@@ -32,13 +32,15 @@ Authentication: X-API-KEY for a PROJECT_MANAGER, senderPhone must match the mana
        Optional: includeInactive, limit, search
        Usage: confirm units manager can access or filter by keyword.
      • LIST_UNIT_EXPENSES — get expenses for units under manager scope
-       Required: projectId
+       Required: projectId (or projectName)
        Optional: unitCode, limit, sourceTypes[], search, fromDate, toDate
        Usage: audit recent costs for a unit or date range.
      • GET_LAST_ELECTRICITY_TOPUP — latest electricity top-up entry
        Required: projectId
        Optional: unitCode
        Usage: check when a unit last topped up electricity.
+
+   JSON schema: see [docs/webhook-project-manager.schema.json](docs/webhook-project-manager.schema.json).
 
 2. GET /api/webhooks/query — manager queries (type driven)
    - Always include senderPhone (optional but recommended) and required fields per query.
@@ -88,7 +90,7 @@ Authentication: X-API-KEY for ACCOUNTANT or ADMIN acting as accountant, senderPh
        Required: payrollId
        Usage: finalizes payroll and deducts advances.
      • LIST_UNIT_EXPENSES — accountant view of unit expenses
-       Optional: projectId, unitCode, limit, sourceTypes[], search, fromDate, toDate
+       Optional: projectId, projectName, unitCode, limit, sourceTypes[], search, fromDate, toDate
        Usage: deeper filters than manager view, includes more data.
      • SEARCH_STAFF — fuzzy staff search
        Required: query
@@ -100,6 +102,8 @@ Authentication: X-API-KEY for ACCOUNTANT or ADMIN acting as accountant, senderPh
      • SEARCH_ACCOUNTING_NOTES — search accounting notes
        Optional: query, status, projectId, unitCode, limit, includeConverted
        Usage: find specific notes by text or state.
+
+   JSON schema: see [docs/webhook-accountant.schema.json](docs/webhook-accountant.schema.json).
 
 2. GET /api/webhooks/query — accountant query endpoint
    - ACCOUNTING_DATA: type=ACCOUNTING_DATA (or omit to default), optional senderPhone.
@@ -114,6 +118,8 @@ Authentication: X-API-KEY for ADMIN. Admins may also call accountant actions abo
 1. GET /api/webhooks/query — platform snapshot
    - ALL_DATA: type=ALL_DATA (defaults when missing), optional senderPhone.
    - Returns counts and aggregates across projects, units, residents, tickets, invoices, staff.
+
+   JSON schema: see [docs/webhook-admin.schema.json](docs/webhook-admin.schema.json).
 
 -------------------------------------------------------------------------------
 Shared Utilities (All Roles)

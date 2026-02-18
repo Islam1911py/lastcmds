@@ -54,7 +54,8 @@ type ActionMap = {
     search?: string | null
   }
   LIST_UNIT_EXPENSES: {
-    projectId: string
+    projectId?: string | null
+    projectName?: string | null
     unitCode?: string | null
     limit?: number | string
     sourceTypes?: Array<
@@ -1189,9 +1190,181 @@ async function handleUnitExpensesList(
   manager: ManagerRecord,
   payload: ActionMap["LIST_UNIT_EXPENSES"]
 ): Promise<HandlerResponse> {
-  const { projectId, unitCode, limit, sourceTypes, search, fromDate, toDate } = payload
+  const {
+    projectId: rawProjectId,
+    projectName,
+    unitCode,
+    limit,
+    sourceTypes,
+    search,
+    fromDate,
+    toDate
+  } = payload
 
-  if (!projectId) {
+  const normalizedProjectName =
+    typeof projectName === "string" && projectName.trim().length > 0
+      ? projectName.trim()
+      : null
+
+  let projectRecord: { id: string; name: string | null } | null = null
+
+  const cleanedProjectId =
+    typeof rawProjectId === "string" && rawProjectId.trim().length > 0
+      ? rawProjectId.trim()
+      : null
+
+  if (cleanedProjectId) {
+    projectRecord = await db.project.findUnique({
+      where: { id: cleanedProjectId },
+      select: {
+        id: true,
+        name: true
+      }
+    })
+
+    if (!projectRecord) {
+      return {
+        status: 404,
+        body: {
+          success: false,
+          error: "Project not found",
+          projectId: cleanedProjectId,
+          humanReadable: {
+            ar: "لم أجد هذا المشروع لذلك لا يمكنني عرض مصروفاته."
+          }
+        }
+      }
+    }
+
+    if (
+      normalizedProjectName &&
+      projectRecord.name &&
+      projectRecord.name.toLowerCase().trim() !== normalizedProjectName.toLowerCase()
+    ) {
+      return {
+        status: 400,
+        body: {
+          success: false,
+          error: "Project identifier mismatch",
+          projectId: projectRecord.id,
+          humanReadable: {
+            ar: "الاسم والرقم المشار إليهما يعودان لمشروعين مختلفين."
+          },
+          issues: {
+            projectId: projectRecord.id,
+            projectName: normalizedProjectName,
+            matchedProjectName: projectRecord.name
+          }
+        }
+      }
+    }
+  }
+
+  if (!projectRecord && normalizedProjectName) {
+    if (manager.canViewAllProjects) {
+      const candidates = await db.project.findMany({
+        select: {
+          id: true,
+          name: true
+        },
+        orderBy: {
+          name: "asc"
+        }
+      })
+
+      const lowerSearch = normalizedProjectName.toLowerCase()
+
+      const matchedCandidates = candidates.filter((candidate) =>
+        candidate.name ? candidate.name.toLowerCase().includes(lowerSearch) : false
+      )
+
+      const exactMatch = matchedCandidates.find((candidate) =>
+        candidate.name
+          ? candidate.name.toLowerCase().trim() === lowerSearch
+          : false
+      )
+
+      if (exactMatch) {
+        projectRecord = exactMatch
+      } else if (matchedCandidates.length === 1) {
+        projectRecord = matchedCandidates[0]
+      }
+
+      if (!projectRecord) {
+        return {
+          status: matchedCandidates.length > 1 ? 409 : 404,
+          body: {
+            success: false,
+            error: matchedCandidates.length > 1 ? "Project name ambiguous" : "Project not found",
+            projectId: null,
+            humanReadable: {
+              ar:
+                matchedCandidates.length > 1
+                  ? "اسم المشروع مطابق لأكثر من مشروع. حدد الاسم الكامل من القائمة."
+                  : "لم أجد مشروعًا بهذا الاسم لذلك لا توجد مصروفات أعرضها."
+            },
+            issues: {
+              projectName: normalizedProjectName,
+              matchedProjectNames: matchedCandidates.map((candidate) => candidate.name)
+            },
+            suggestions:
+              matchedCandidates.length > 0
+                ? [
+                    {
+                      title: "اختيار اسم المشروع",
+                      prompt: "اذكر اسم المشروع بالضبط كما هو مسجل.",
+                      data: {
+                        options: matchedCandidates.map((candidate) => ({
+                          projectId: candidate.id,
+                          projectName: candidate.name
+                        }))
+                      }
+                    }
+                  ]
+                : undefined
+          }
+        }
+      }
+    } else {
+      const matchedAssignment = manager.assignedProjects.find((assignment) => {
+        const assignmentName = assignment.project?.name
+        return assignmentName
+          ? assignmentName.toLowerCase().trim() === normalizedProjectName.toLowerCase()
+          : false
+      })
+
+      if (!matchedAssignment) {
+        return {
+          status: 403,
+          body: {
+            success: false,
+            error: "Project manager is not assigned to this project",
+            projectId: null,
+            humanReadable: {
+              ar: "المدير غير مكلّف بهذا المشروع بالاسم المذكور."
+            },
+            suggestions: [
+              {
+                title: "طلب إضافة المشروع",
+                prompt: "اطلب إضافة المشروع لصلاحياتي ثم أعد الطلب باسم المشروع أو رقمه.",
+                data: {
+                  managerId: manager.id,
+                  projectName: normalizedProjectName
+                }
+              }
+            ]
+          }
+        }
+      }
+
+      projectRecord = {
+        id: matchedAssignment.projectId,
+        name: matchedAssignment.project?.name ?? null
+      }
+    }
+  }
+
+  if (!projectRecord) {
     return {
       status: 400,
       body: {
@@ -1199,17 +1372,19 @@ async function handleUnitExpensesList(
         error: "projectId is required",
         projectId: null,
         humanReadable: {
-          ar: "أحتاج رقم المشروع حتى أستعرض المصروفات."
+          ar: "أحتاج رقم المشروع أو اسمه حتى أستعرض المصروفات."
         },
         suggestions: [
           {
             title: "تحديد المشروع",
-            prompt: "اذكر رقم المشروع ثم اطلب عرض مصروفات الوحدة."
+            prompt: "اذكر رقم المشروع أو اسمه ثم اطلب عرض مصروفات الوحدة."
           }
         ]
       }
     }
   }
+
+  const projectId = projectRecord.id
 
   if (!assertProjectAccess(manager, projectId)) {
     return {
@@ -1368,7 +1543,7 @@ async function handleUnitExpensesList(
   const appliedSourceTypesForFilter =
     finalTypeSet && finalTypeSet.size > 0 ? Array.from(finalTypeSet) : []
 
-  const whereClauses: Prisma.UnitExpenseWhereInput[] = [
+  const baseWhereClauses: Prisma.UnitExpenseWhereInput[] = [
     {
       unit: {
         projectId,
@@ -1378,21 +1553,23 @@ async function handleUnitExpensesList(
   ]
 
   if (appliedSourceTypesForFilter.length > 0) {
-    whereClauses.push({
+    baseWhereClauses.push({
       sourceType: { in: appliedSourceTypesForFilter }
     })
   }
 
   if (descriptionFilter) {
-    whereClauses.push(descriptionFilter)
+    baseWhereClauses.push(descriptionFilter)
   }
 
+  const currentWhereClauses = [...baseWhereClauses]
+
   if (Object.keys(dateFilters).length > 0) {
-    whereClauses.push({ date: dateFilters })
+    currentWhereClauses.push({ date: dateFilters })
   }
 
   const whereClause: Prisma.UnitExpenseWhereInput =
-    whereClauses.length === 1 ? whereClauses[0] : { AND: whereClauses }
+    currentWhereClauses.length === 1 ? currentWhereClauses[0] : { AND: currentWhereClauses }
 
   const expenses = shouldSkipQuery
     ? []
@@ -1428,6 +1605,124 @@ async function handleUnitExpensesList(
     (sum, expense) => sum + toNumericAmount(expense.amount ?? 0),
     0
   )
+  const sourceBreakdown = expenses.reduce((acc, expense) => {
+    const key = expense.sourceType as ExpenseSourceType
+    acc[key] = acc[key] ?? { count: 0, amount: 0 }
+    acc[key].count += 1
+    acc[key].amount += toNumericAmount(expense.amount ?? 0)
+    return acc
+  }, {} as Record<ExpenseSourceType, { count: number; amount: number }>)
+  const averageExpense = expenses.length > 0 ? Number((totalAmount / expenses.length).toFixed(2)) : 0
+
+  let topCategory: {
+    type: ExpenseSourceType
+    count: number
+    total: number
+  } | null = null
+
+  for (const [typeKey, breakdown] of Object.entries(sourceBreakdown) as Array<[
+    ExpenseSourceType,
+    { count: number; amount: number }
+  ]>) {
+    if (!topCategory || breakdown.amount > topCategory.total) {
+      topCategory = {
+        type: typeKey,
+        count: breakdown.count,
+        total: Number(breakdown.amount.toFixed(2))
+      }
+    }
+  }
+
+  type TrendDirection = "UP" | "DOWN" | "SAME" | "NO_DATA"
+
+  let trendInfo: {
+    direction: TrendDirection
+    currentTotal: number
+    previousTotal: number
+    percentageChange: number | null
+    previousRange: {
+      from: string | null
+      to: string | null
+    }
+    reason?: "MISSING_RANGE" | "NO_BASELINE"
+  } | null = null
+
+  if (!shouldSkipQuery && fromDateValue && toDateValue) {
+    const periodMs = Math.max(toDateValue.getTime() - fromDateValue.getTime(), 0)
+    const previousPeriodEnd = new Date(fromDateValue.getTime() - 1)
+    previousPeriodEnd.setHours(23, 59, 59, 999)
+    const previousPeriodStart = new Date(previousPeriodEnd.getTime() - periodMs)
+    previousPeriodStart.setHours(0, 0, 0, 0)
+
+    const previousDateFilter: Prisma.DateTimeFilter = {
+      gte: previousPeriodStart,
+      lte: previousPeriodEnd
+    }
+
+    const previousWhereClauses = [...baseWhereClauses, { date: previousDateFilter }]
+    const previousWhere: Prisma.UnitExpenseWhereInput =
+      previousWhereClauses.length === 1
+        ? previousWhereClauses[0]
+        : { AND: previousWhereClauses }
+
+    const previousAggregate = await db.unitExpense.aggregate({
+      where: previousWhere,
+      _sum: { amount: true }
+    })
+
+    const previousTotal = toNumericAmount(previousAggregate._sum.amount ?? 0)
+
+    let direction: TrendDirection = "NO_DATA"
+    let percentageChange: number | null = null
+    let reason: "NO_BASELINE" | undefined
+
+    if (previousTotal === 0 && totalAmount === 0) {
+      direction = "SAME"
+      percentageChange = 0
+    } else if (previousTotal === 0 && totalAmount > 0) {
+      direction = "UP"
+      reason = "NO_BASELINE"
+    } else if (previousTotal > 0 && totalAmount === 0) {
+      direction = "DOWN"
+      percentageChange = 100
+    } else if (previousTotal > 0) {
+      const delta = totalAmount - previousTotal
+      if (Math.abs(delta) < 0.01) {
+        direction = "SAME"
+        percentageChange = 0
+      } else if (delta > 0) {
+        direction = "UP"
+        percentageChange = Number(((delta / previousTotal) * 100).toFixed(1))
+      } else {
+        direction = "DOWN"
+        percentageChange = Number(((Math.abs(delta) / previousTotal) * 100).toFixed(1))
+      }
+    }
+
+    trendInfo = {
+      direction,
+      currentTotal: Number(totalAmount.toFixed(2)),
+      previousTotal: Number(previousTotal.toFixed(2)),
+      percentageChange,
+      previousRange: {
+        from: formatDate(previousPeriodStart),
+        to: formatDate(previousPeriodEnd)
+      },
+      reason
+    }
+  } else if (!shouldSkipQuery && (fromDateValue || toDateValue)) {
+    trendInfo = {
+      direction: "NO_DATA",
+      currentTotal: Number(totalAmount.toFixed(2)),
+      previousTotal: 0,
+      percentageChange: null,
+      previousRange: {
+        from: null,
+        to: null
+      },
+      reason: "MISSING_RANGE"
+    }
+  }
   const latestExpense = expenses[0]
   const unitCodes = Array.from(
     new Set(
@@ -1444,6 +1739,130 @@ async function handleUnitExpensesList(
   const latestDateLabel = latestExpense ? formatDate(latestExpense.date) : null
   const detailLines = buildExpenseLines(expenses)
   const remainingCount = Math.max(expenses.length - detailLines.length, 0)
+
+  const topExpenses = expenses.slice(0, 5)
+  const reportLines: string[] = []
+  reportLines.push("📊 تقرير المصروفات")
+  reportLines.push(`• الإجمالي: ${formatCurrency(totalAmount)} جنيه`)
+  reportLines.push(`• عدد العمليات: ${expenses.length}`)
+  if (appliedSourceTypesForFilter.length > 0 || matchedSourceTypes.size > 0) {
+    const appliedTypes = appliedSourceTypesForFilter.length
+      ? appliedSourceTypesForFilter
+      : Array.from(matchedSourceTypes)
+    if (appliedTypes.length > 0) {
+      reportLines.push(
+        `• أنواع المصادر: ${appliedTypes
+          .map((type) => formatSourceTypeLabel(type))
+          .join("، ")}`
+      )
+    }
+  }
+  if (fromDateValue || toDateValue) {
+    reportLines.push(
+      `• الفترة: ${formatDate(fromDateValue) ?? "—"} → ${formatDate(toDateValue) ?? "—"}`
+    )
+  }
+  if (unit) {
+    reportLines.push(`• الوحدة: ${unit.code ?? "—"}`)
+  } else {
+    reportLines.push("• وحدة محددة: غير محدد")
+  }
+  if (expenses.length > 0) {
+    reportLines.push(`• متوسط العملية: ${formatCurrency(averageExpense)} جنيه`)
+  }
+  if (topCategory) {
+    reportLines.push(
+      `• أعلى فئة: ${formatSourceTypeLabel(topCategory.type)} — ${formatCurrency(topCategory.total)} جنيه (${topCategory.count} عملية)`
+    )
+  }
+  if (trendInfo) {
+    let trendLine: string
+    const changeLabel =
+      trendInfo.percentageChange !== null
+        ? ` (${trendInfo.percentageChange.toFixed(1)}%)`
+        : trendInfo.reason === "NO_BASELINE"
+          ? " (لا توجد فترة مقارنة سابقة)"
+          : ""
+
+    switch (trendInfo.direction) {
+      case "UP":
+        trendLine = `• الاتجاه: المصروفات أعلى من الفترة السابقة${changeLabel}.`
+        break
+      case "DOWN":
+        trendLine = `• الاتجاه: المصروفات أقل من الفترة السابقة${changeLabel}.`
+        break
+      case "SAME":
+        trendLine = "• الاتجاه: المصروفات في نفس مستوى الفترة السابقة."
+        break
+      default:
+        trendLine =
+          trendInfo.reason === "MISSING_RANGE"
+            ? "• الاتجاه: لا يمكن المقارنة لعدم تحديد فترة كاملة."
+            : "• الاتجاه: لا توجد بيانات كافية للمقارنة."
+        break
+    }
+
+    reportLines.push(trendLine)
+  }
+  reportLines.push("-------------------")
+
+  if (topExpenses.length === 0) {
+    reportLines.push("- لا توجد مصروفات مطابقة")
+  } else {
+    for (const expense of topExpenses) {
+      const expenseUnitLabel = expense.unit?.code ?? expense.unit?.name ?? "—"
+      const description = expense.description?.trim() || "(بدون وصف)"
+      const amountLabel = formatCurrency(toNumericAmount(expense.amount ?? 0))
+      const dateLabel = formatDate(expense.date) ?? "—"
+      reportLines.push(`- ${dateLabel} • ${expenseUnitLabel}: ${amountLabel} جنيه — ${description}`)
+    }
+    if (expenses.length > topExpenses.length) {
+      reportLines.push(`- (+${expenses.length - topExpenses.length} مصروف إضافي) ...`)
+    }
+  }
+
+  const structuredReport = {
+    summary: reportLines.join("\n"),
+    totalAmount,
+    rawCount: expenses.length,
+    averageExpense,
+    topCategory: topCategory
+      ? {
+          sourceType: topCategory.type,
+          label: formatSourceTypeLabel(topCategory.type),
+          amount: topCategory.total,
+          count: topCategory.count
+        }
+      : null,
+    trend: trendInfo
+      ? {
+          direction: trendInfo.direction,
+          currentTotal: trendInfo.currentTotal,
+          previousTotal: trendInfo.previousTotal,
+          percentageChange: trendInfo.percentageChange,
+          previousRange: trendInfo.previousRange,
+          reason: trendInfo.reason ?? null
+        }
+      : null,
+    topExpenses: topExpenses.map((expense) => ({
+      id: expense.id,
+      unitCode: expense.unit?.code ?? null,
+      unitName: expense.unit?.name ?? null,
+      description: expense.description,
+      amount: toNumericAmount(expense.amount ?? 0),
+      date: expense.date,
+      sourceType: expense.sourceType
+    })),
+    filters: {
+      projectId,
+      projectName: projectRecord.name ?? null,
+      unitCode: unit?.code ?? null,
+      search: rawSearchTerm,
+      fromDate: fromDateValue ? formatDate(fromDateValue) : null,
+      toDate: toDateValue ? formatDate(toDateValue) : null,
+      sourceTypes: appliedSourceTypesForFilter
+    }
+  }
 
   const humanReadable: HumanReadable = expenses.length
     ? {
@@ -1531,6 +1950,7 @@ async function handleUnitExpensesList(
       success: true,
       projectId,
       meta: {
+        projectName: projectRecord.name ?? null,
         unitCode: unit?.code ?? null,
         count: expenses.length,
         totalAmount,
@@ -1541,10 +1961,41 @@ async function handleUnitExpensesList(
         descriptionSearchTerm: cleanedSearchTerm,
         skippedQueryBecauseOfFilters: shouldSkipQuery,
         fromDate: fromDateValue ? formatDate(fromDateValue) : null,
-        toDate: toDateValue ? formatDate(toDateValue) : null
+        toDate: toDateValue ? formatDate(toDateValue) : null,
+        breakdownBySourceType: Object.fromEntries(
+          Object.entries(sourceBreakdown).map(([key, value]) => [
+            key,
+            {
+              count: value.count,
+              amount: Number(value.amount.toFixed(2)),
+              label: formatSourceTypeLabel(key as ExpenseSourceType)
+            }
+          ])
+        ),
+        averageExpense,
+        topCategory: topCategory
+          ? {
+              sourceType: topCategory.type,
+              label: formatSourceTypeLabel(topCategory.type),
+              count: topCategory.count,
+              amount: topCategory.total
+            }
+          : null,
+        trend: trendInfo
+          ? {
+              direction: trendInfo.direction,
+              currentTotal: trendInfo.currentTotal,
+              previousTotal: trendInfo.previousTotal,
+              percentageChange: trendInfo.percentageChange,
+              previousRange: trendInfo.previousRange,
+              reason: trendInfo.reason ?? null
+            }
+          : null,
+        reportSummary: structuredReport.summary
       },
       data: {
-        expenses
+        expenses,
+        report: structuredReport
       },
       humanReadable,
       suggestions

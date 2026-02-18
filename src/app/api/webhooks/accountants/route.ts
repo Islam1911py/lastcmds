@@ -47,6 +47,13 @@ const ALLOWED_ACTIONS = [
 
 type AllowedAction = (typeof ALLOWED_ACTIONS)[number]
 
+const EXPENSE_SOURCE_LABELS: Record<ExpenseSourceType, string> = {
+  TECHNICIAN_WORK: "أعمال فنية",
+  STAFF_WORK: "أعمال موظفين",
+  ELECTRICITY: "كهرباء",
+  OTHER: "مصروفات أخرى"
+}
+
 type ActionMap = {
   CREATE_PM_ADVANCE: {
     staffId?: string | null
@@ -89,6 +96,7 @@ type ActionMap = {
   }
   LIST_UNIT_EXPENSES: {
     projectId?: string | null
+    projectName?: string | null
     unitCode?: string | null
     limit?: number | string
     sourceTypes?: Array<
@@ -256,6 +264,10 @@ function formatArabicSource(source: string | null | undefined) {
   }
 
   return "صندوق المكتب"
+}
+
+function formatArabicExpenseSource(type: ExpenseSourceType) {
+  return EXPENSE_SOURCE_LABELS[type] ?? "مصروفات أخرى"
 }
 
 function buildArabicConversionSummary(options: {
@@ -1820,13 +1832,98 @@ async function handleListUnitExpenses(
   accountant: AccountantRecord,
   payload: ActionMap["LIST_UNIT_EXPENSES"]
 ): Promise<HandlerResponse> {
-  const { projectId, unitCode, limit, sourceTypes, search, fromDate, toDate } = payload
+  const {
+    projectId: rawProjectId,
+    projectName,
+    unitCode,
+    limit,
+    sourceTypes,
+    search,
+    fromDate,
+    toDate
+  } = payload
+
+  const normalizedProjectName =
+    typeof projectName === "string" && projectName.trim().length > 0
+      ? projectName.trim()
+      : null
+
+  let resolvedProjectId = typeof rawProjectId === "string" && rawProjectId.trim().length > 0
+    ? rawProjectId.trim()
+    : null
 
   let project: { id: string; name: string | null } | null = null
 
-  if (projectId) {
+  if (normalizedProjectName && !resolvedProjectId) {
+    const candidates = await db.project.findMany({
+      select: {
+        id: true,
+        name: true
+      },
+      orderBy: {
+        name: "asc"
+      }
+    })
+
+    const lowerSearch = normalizedProjectName.toLowerCase()
+
+    const matchedCandidates = candidates.filter((candidate) =>
+      candidate.name ? candidate.name.toLowerCase().includes(lowerSearch) : false
+    )
+
+    const exactMatch = matchedCandidates.find((candidate) =>
+      candidate.name
+        ? candidate.name.toLowerCase().trim() === lowerSearch
+        : false
+    )
+
+    if (exactMatch) {
+      project = exactMatch
+    } else if (matchedCandidates.length === 1) {
+      project = matchedCandidates[0]
+    }
+
+    if (!project) {
+      return {
+        status: matchedCandidates.length > 1 ? 409 : 404,
+        body: {
+          success: false,
+          error: matchedCandidates.length > 1 ? "Project name ambiguous" : "Project not found",
+          humanReadable: {
+            ar:
+              matchedCandidates.length > 1
+                ? "اسم المشروع الذي أرسلته يطابق أكثر من مشروع. حدد الاسم الكامل من القائمة."
+                : "لم أجد مشروعًا بهذا الاسم أثناء البحث عن المصروفات."
+          },
+          issues: {
+            projectName: normalizedProjectName,
+            matchedProjectNames: matchedCandidates.map((candidate) => candidate.name)
+          },
+          suggestions:
+            matchedCandidates.length > 0
+              ? [
+                  {
+                    title: "اختيار اسم المشروع",
+                    prompt: "اذكر اسم المشروع بالضبط كما هو مسجل.",
+                    data: {
+                      options: matchedCandidates.map((candidate) => ({
+                        projectId: candidate.id,
+                        projectName: candidate.name
+                      }))
+                    }
+                  }
+                ]
+              : undefined
+        }
+      }
+    }
+
+    resolvedProjectId = project.id
+  }
+
+  if (resolvedProjectId) {
     project = await db.project.findUnique({
-      where: { id: projectId },
+      where: { id: resolvedProjectId },
       select: {
         id: true,
         name: true
@@ -1841,6 +1938,24 @@ async function handleListUnitExpenses(
           error: "Project not found",
           humanReadable: {
             ar: "لم أجد المشروع المطلوب لعرض مصروفاته."
+          }
+        }
+      }
+    }
+
+    if (project && normalizedProjectName && project.name && project.name.toLowerCase().trim() !== normalizedProjectName.toLowerCase()) {
+      return {
+        status: 400,
+        body: {
+          success: false,
+          error: "Project identifier mismatch",
+          humanReadable: {
+            ar: "المعرف والاسم المشار إليهما يعودان لمشروعين مختلفين."
+          },
+          issues: {
+            projectId: resolvedProjectId,
+            projectName: normalizedProjectName,
+            matchedProjectName: project.name
           }
         }
       }
@@ -1970,10 +2085,10 @@ async function handleListUnitExpenses(
   const appliedSourceTypesForFilter =
     finalTypeSet && finalTypeSet.size > 0 ? Array.from(finalTypeSet) : []
 
-  const whereClauses: Prisma.UnitExpenseWhereInput[] = []
+  const baseWhereClauses: Prisma.UnitExpenseWhereInput[] = []
 
   if (project) {
-    whereClauses.push({
+    baseWhereClauses.push({
       unit: {
         projectId: project.id
       }
@@ -1981,29 +2096,31 @@ async function handleListUnitExpenses(
   }
 
   if (unit) {
-    whereClauses.push({ unitId: unit.id })
+    baseWhereClauses.push({ unitId: unit.id })
   }
 
   if (appliedSourceTypesForFilter.length > 0) {
-    whereClauses.push({
+    baseWhereClauses.push({
       sourceType: { in: appliedSourceTypesForFilter }
     })
   }
 
   if (descriptionFilter) {
-    whereClauses.push(descriptionFilter)
+    baseWhereClauses.push(descriptionFilter)
   }
 
+  const currentWhereClauses = [...baseWhereClauses]
+
   if (Object.keys(dateFilters).length > 0) {
-    whereClauses.push({ date: dateFilters })
+    currentWhereClauses.push({ date: dateFilters })
   }
 
   const whereClause: Prisma.UnitExpenseWhereInput | undefined =
-    whereClauses.length === 0
+    currentWhereClauses.length === 0
       ? undefined
-      : whereClauses.length === 1
-        ? whereClauses[0]
-        : { AND: whereClauses }
+      : currentWhereClauses.length === 1
+        ? currentWhereClauses[0]
+        : { AND: currentWhereClauses }
 
   const take = parseLimit(limit, 25, 100)
 
@@ -2060,6 +2177,241 @@ async function handleListUnitExpenses(
     return acc
   }, {} as Record<ExpenseSourceType, { count: number; amount: number }>)
 
+  const averageExpense = expenses.length > 0 ? Number((totalAmount / expenses.length).toFixed(2)) : 0
+
+  let topCategory: {
+    type: ExpenseSourceType
+    count: number
+    total: number
+  } | null = null
+
+  for (const [typeKey, breakdown] of Object.entries(sourceBreakdown) as Array<[
+    ExpenseSourceType,
+    { count: number; amount: number }
+  ]>) {
+    if (!topCategory || breakdown.amount > topCategory.total) {
+      topCategory = {
+        type: typeKey,
+        count: breakdown.count,
+        total: Number(breakdown.amount.toFixed(2))
+      }
+    }
+  }
+
+  type TrendDirection = "UP" | "DOWN" | "SAME" | "NO_DATA"
+
+  let trendInfo: {
+    direction: TrendDirection
+    currentTotal: number
+    previousTotal: number
+    percentageChange: number | null
+    previousRange: {
+      from: string | null
+      to: string | null
+    }
+    reason?: "MISSING_RANGE" | "NO_BASELINE"
+  } | null = null
+
+  if (!shouldSkipQuery && fromDateValue && toDateValue) {
+    const periodMs = Math.max(toDateValue.getTime() - fromDateValue.getTime(), 0)
+    const previousPeriodEnd = new Date(fromDateValue.getTime() - 1)
+    previousPeriodEnd.setHours(23, 59, 59, 999)
+    const previousPeriodStart = new Date(previousPeriodEnd.getTime() - periodMs)
+    previousPeriodStart.setHours(0, 0, 0, 0)
+
+    const previousDateFilter: Prisma.DateTimeFilter = {
+      gte: previousPeriodStart,
+      lte: previousPeriodEnd
+    }
+
+    const previousWhereClauses = [...baseWhereClauses, { date: previousDateFilter }]
+    const previousWhere: Prisma.UnitExpenseWhereInput =
+      previousWhereClauses.length === 1
+        ? previousWhereClauses[0]
+        : { AND: previousWhereClauses }
+
+    const previousAggregate = await db.unitExpense.aggregate({
+      where: previousWhere,
+      _sum: { amount: true }
+    })
+
+    const previousTotalRaw = previousAggregate._sum.amount ?? 0
+    const previousTotal = typeof previousTotalRaw === "number" ? previousTotalRaw : Number(previousTotalRaw)
+
+    let direction: TrendDirection = "NO_DATA"
+    let percentageChange: number | null = null
+    let reason: "NO_BASELINE" | undefined
+
+    if (previousTotal === 0 && totalAmount === 0) {
+      direction = "SAME"
+      percentageChange = 0
+    } else if (previousTotal === 0 && totalAmount > 0) {
+      direction = "UP"
+      reason = "NO_BASELINE"
+    } else if (previousTotal > 0 && totalAmount === 0) {
+      direction = "DOWN"
+      percentageChange = 100
+    } else if (previousTotal > 0) {
+      const delta = totalAmount - previousTotal
+      if (Math.abs(delta) < 0.01) {
+        direction = "SAME"
+        percentageChange = 0
+      } else if (delta > 0) {
+        direction = "UP"
+        percentageChange = Number(((delta / previousTotal) * 100).toFixed(1))
+      } else {
+        direction = "DOWN"
+        percentageChange = Number(((Math.abs(delta) / previousTotal) * 100).toFixed(1))
+      }
+    }
+
+    trendInfo = {
+      direction,
+      currentTotal: Number(totalAmount.toFixed(2)),
+      previousTotal: Number(previousTotal.toFixed(2)),
+      percentageChange,
+      previousRange: {
+        from: formatDate(previousPeriodStart),
+        to: formatDate(previousPeriodEnd)
+      },
+      reason
+    }
+  } else if (!shouldSkipQuery && (fromDateValue || toDateValue)) {
+    trendInfo = {
+      direction: "NO_DATA",
+      currentTotal: Number(totalAmount.toFixed(2)),
+      previousTotal: 0,
+      percentageChange: null,
+      previousRange: {
+        from: null,
+        to: null
+      },
+      reason: "MISSING_RANGE"
+    }
+  }
+
+  const topExpenses = expenses.slice(0, 5)
+
+  const reportLines: string[] = []
+  reportLines.push("📊 تقرير المصروفات")
+  reportLines.push(`• الإجمالي: ${formatCurrency(totalAmount)} جنيه`)
+  reportLines.push(`• عدد العمليات: ${expenses.length}`)
+  if (appliedSourceTypesForFilter.length > 0 || matchedSourceTypes.size > 0) {
+    const appliedTypes = appliedSourceTypesForFilter.length
+      ? appliedSourceTypesForFilter
+      : Array.from(matchedSourceTypes)
+    if (appliedTypes.length > 0) {
+      reportLines.push(
+        `• أنواع المصادر: ${appliedTypes
+          .map((type) => formatArabicExpenseSource(type))
+          .join("، ")}`
+      )
+    }
+  }
+  if (fromDateValue || toDateValue) {
+    reportLines.push(
+      `• الفترة: ${formatDate(fromDateValue) ?? "—"} → ${formatDate(toDateValue) ?? "—"}`
+    )
+  }
+  if (expenses.length > 0) {
+    reportLines.push(`• متوسط العملية: ${formatCurrency(averageExpense)} جنيه`)
+  }
+  if (topCategory) {
+    reportLines.push(
+      `• أعلى فئة: ${formatArabicExpenseSource(topCategory.type)} — ${formatCurrency(topCategory.total)} جنيه (${topCategory.count} عملية)`
+    )
+  }
+  if (trendInfo) {
+    let trendLine: string
+    const changeLabel =
+      trendInfo.percentageChange !== null
+        ? ` (${trendInfo.percentageChange.toFixed(1)}%)`
+        : trendInfo.reason === "NO_BASELINE"
+          ? " (لا توجد فترة مقارنة سابقة)"
+          : ""
+
+    switch (trendInfo.direction) {
+      case "UP":
+        trendLine = `• الاتجاه: المصروفات أعلى من الفترة السابقة${changeLabel}.`
+        break
+      case "DOWN":
+        trendLine = `• الاتجاه: المصروفات أقل من الفترة السابقة${changeLabel}.`
+        break
+      case "SAME":
+        trendLine = "• الاتجاه: المصروفات في نفس مستوى الفترة السابقة."
+        break
+      default:
+        trendLine =
+          trendInfo.reason === "MISSING_RANGE"
+            ? "• الاتجاه: لا يمكن المقارنة لعدم تحديد فترة كاملة."
+            : "• الاتجاه: لا توجد بيانات كافية للمقارنة."
+        break
+    }
+
+    reportLines.push(trendLine)
+  }
+  reportLines.push("-------------------")
+
+  if (topExpenses.length === 0) {
+    reportLines.push("- لا توجد مصروفات مطابقة")
+  } else {
+    for (const expense of topExpenses) {
+      const unitLabel = expense.unit?.code ?? expense.unit?.name ?? "—"
+      const description = expense.description?.trim() || "(بدون وصف)"
+      const amountLabel = formatCurrency(expense.amount ?? 0)
+      const dateLabel = formatDate(expense.date) ?? "—"
+      reportLines.push(`- ${dateLabel} • ${unitLabel}: ${amountLabel} جنيه — ${description}`)
+    }
+    if (expenses.length > topExpenses.length) {
+      reportLines.push(`- (+${expenses.length - topExpenses.length} مصروف إضافي) ...`)
+    }
+  }
+
+  const structuredReport = {
+    summary: reportLines.join("\n"),
+    totalAmount,
+    rawCount: expenses.length,
+    averageExpense,
+    topCategory: topCategory
+      ? {
+          sourceType: topCategory.type,
+          label: formatArabicExpenseSource(topCategory.type),
+          amount: topCategory.total,
+          count: topCategory.count
+        }
+      : null,
+    trend: trendInfo
+      ? {
+          direction: trendInfo.direction,
+          currentTotal: trendInfo.currentTotal,
+          previousTotal: trendInfo.previousTotal,
+          percentageChange: trendInfo.percentageChange,
+          previousRange: trendInfo.previousRange,
+          reason: trendInfo.reason ?? null
+        }
+      : null,
+    topExpenses: topExpenses.map((expense) => ({
+      id: expense.id,
+      unitCode: expense.unit?.code ?? null,
+      unitName: expense.unit?.name ?? null,
+      projectId: expense.unit?.project?.id ?? null,
+      projectName: expense.unit?.project?.name ?? null,
+      description: expense.description,
+      amount: expense.amount,
+      date: expense.date,
+      sourceType: expense.sourceType
+    })),
+    filters: {
+      projectId: project?.id ?? null,
+      projectName: project?.name ?? null,
+      unitCode: unit?.code ?? null,
+      search: rawSearchTerm,
+      fromDate: fromDateValue ? formatDate(fromDateValue) : null,
+      toDate: toDateValue ? formatDate(toDateValue) : null,
+      sourceTypes: appliedSourceTypesForFilter
+    }
+  }
+
   const projectLabel = project?.name ?? project?.id ?? "all projects"
   const unitLabel = unit?.code ?? null
 
@@ -2078,6 +2430,7 @@ async function handleListUnitExpenses(
           prompt: "حلل لي المصروفات دي حسب نوع المصدر وسلمني الإجمالي لكل نوع.",
           data: {
             projectId: project?.id ?? null,
+            projectName: project?.name ?? null,
             unitCode: unit?.code ?? null,
             search: rawSearchTerm
           }
@@ -2111,7 +2464,8 @@ async function handleListUnitExpenses(
     body: {
       success: true,
       data: {
-        expenses
+        expenses,
+        report: structuredReport
       },
       meta: {
         projectId: project?.id ?? null,
@@ -2132,7 +2486,27 @@ async function handleListUnitExpenses(
           from: formatDate(fromDateValue),
           to: formatDate(toDateValue)
         },
-        breakdownBySourceType: sourceBreakdown
+        breakdownBySourceType: sourceBreakdown,
+        averageExpense,
+        topCategory: topCategory
+          ? {
+              sourceType: topCategory.type,
+              label: formatArabicExpenseSource(topCategory.type),
+              count: topCategory.count,
+              amount: topCategory.total
+            }
+          : null,
+        trend: trendInfo
+          ? {
+              direction: trendInfo.direction,
+              currentTotal: trendInfo.currentTotal,
+              previousTotal: trendInfo.previousTotal,
+              percentageChange: trendInfo.percentageChange,
+              previousRange: trendInfo.previousRange,
+              reason: trendInfo.reason ?? null
+            }
+          : null,
+        reportSummary: structuredReport.summary
       },
       humanReadable,
       suggestions,
