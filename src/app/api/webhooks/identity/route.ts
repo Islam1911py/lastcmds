@@ -11,8 +11,7 @@ const MANAGED_ROLES = ["ADMIN", "ACCOUNTANT", "PROJECT_MANAGER"] as const
 type ManagedRole = (typeof MANAGED_ROLES)[number]
 
 type HumanReadable = {
-  en?: string
-  ar?: string
+  ar: string
 }
 
 type Suggestion = {
@@ -66,7 +65,6 @@ function buildUnknownResponse(input: string): ResponseBody {
     contact: null,
     matchScore: 0,
     humanReadable: {
-      en: `No contact matched the phone ${input}.`,
       ar: `لم يتم العثور على جهة اتصال للرقم ${input}.`
     },
     suggestions: [
@@ -97,7 +95,6 @@ export async function POST(req: NextRequest) {
           success: false,
           error: "phone is required",
           humanReadable: {
-            en: "Provide the phone number to identify.",
             ar: "أرسل رقم الهاتف المطلوب التعرف عليه."
           }
         },
@@ -146,20 +143,40 @@ export async function POST(req: NextRequest) {
     let responseBody: ResponseBody
 
     if (userMatch && MANAGED_ROLES.includes(userMatch.role as ManagedRole)) {
-      const projectEntries = userMatch.assignedProjects?.map((assignment) => ({
-        id: assignment.project?.id ?? assignment.projectId,
-        name: assignment.project?.name ?? assignment.projectId
-      })) ?? []
+      const role = userMatch.role as ManagedRole
+      const assignedProjects =
+        userMatch.assignedProjects?.map((assignment) => ({
+          id: assignment.project?.id ?? assignment.projectId,
+          name: assignment.project?.name ?? assignment.projectId
+        })) ?? []
+
+      const shouldLoadAllProjects = role === "ADMIN" || role === "ACCOUNTANT" || !!userMatch.canViewAllProjects
+
+      const projects = shouldLoadAllProjects
+        ? await db.project.findMany({
+            select: {
+              id: true,
+              name: true
+            },
+            orderBy: {
+              name: "asc"
+            }
+          })
+        : assignedProjects
+
+      const projectEntries = shouldLoadAllProjects
+        ? projects.map((project) => ({ id: project.id, name: project.name }))
+        : assignedProjects
 
       const contact: ContactResult = {
         type: "USER",
-        role: userMatch.role as ManagedRole,
+        role,
         id: userMatch.id,
         name: userMatch.name,
         whatsappPhone: userMatch.whatsappPhone,
         phone: (userMatch as { phone?: string | null }).phone ?? null,
         email: userMatch.email,
-        canViewAllProjects: !!userMatch.canViewAllProjects,
+        canViewAllProjects: shouldLoadAllProjects,
         projects: projectEntries
       }
 
@@ -169,7 +186,6 @@ export async function POST(req: NextRequest) {
         contact,
         matchScore: 1,
         humanReadable: {
-          en: `Phone ${input} belongs to ${contact.name ?? "a user"} (${contact.role}).`,
           ar: `الرقم ${input} يعود إلى ${contact.name ?? "مستخدم"} (${contact.role}).`
         },
         suggestions: contact.role === "PROJECT_MANAGER"
@@ -233,7 +249,6 @@ export async function POST(req: NextRequest) {
           contact,
           matchScore: 0.8,
           humanReadable: {
-            en: `Phone ${input} belongs to resident ${contact.name ?? "(unnamed)"} in unit ${contact.unit.code}.`,
             ar: `الرقم ${input} يخص الساكن ${contact.name ?? "بدون اسم"} في الوحدة ${contact.unit.code}.`
           },
           suggestions: [
