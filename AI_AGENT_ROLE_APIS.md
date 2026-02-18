@@ -45,6 +45,7 @@ Central dispatcher driven by the `action` field. Requires the manager's WhatsApp
 | Action | Purpose | Required Payload Fields | Optional Fields |
 |--------|---------|-------------------------|-----------------|
 | `LIST_PROJECT_TICKETS` | Fetch latest tickets for a project/unit | `projectId` | `unitCode`, `statuses[]` (`NEW`, `IN_PROGRESS`, `DONE`), `limit` (default 5) |
+| `LIST_UNIT_EXPENSES` | Finance snapshot with trends and top expenses | `projectId` *(or)* `projectName` | `unitCode`, `limit`, `sourceTypes[]`, `search`, `fromDate`, `toDate`, `filterDsl` |
 | `CREATE_OPERATIONAL_EXPENSE` | Record an operational expense | `projectId`, `unitCode`, `description`, `amount`, `sourceType` (`OFFICE_FUND` or `PM_ADVANCE`) | `pmAdvanceId` (when `sourceType=PM_ADVANCE`), `recordedAt` (ISO date) |
 | `GET_RESIDENT_PHONE` | Lookup residents for outreach | `projectId`, `unitCode` | `residentName`, `limit` (default 5) |
 
@@ -65,6 +66,50 @@ Central dispatcher driven by the `action` field. Requires the manager's WhatsApp
 - `meta` surfaces counts, unit codes, remaining advance balance, etc.
 - `humanReadable` delivers bilingual summaries for quick agent narration.
 - `suggestions` proposes follow-up prompts (e.g. “اعرض جميع السكان”).
+
+#### LIST_UNIT_EXPENSES Highlights
+- Combine text `search` with structured `filterDsl` clauses for precision (e.g. amount thresholds or source types).
+- Returns trend comparisons, top categories, top five expenses, and Arabic summaries ready for WhatsApp replies.
+- Admin keys can reuse the same payload to scope across all projects; unresolved `projectName` prompts the API to guide the agent toward the exact match.
+
+## ✏️ Expense Filter DSL
+
+`filterDsl` lets the agent add SQL-style AND clauses to expense queries without exposing raw SQL. Each condition follows `field operator value`; multiple conditions can be chained with `AND`. The service rejects unsupported syntax and returns localized error hints.
+
+| Field | Type | Operators | Notes |
+|-------|------|-----------|-------|
+| `amount` | number | `=`, `!=`, `>`, `>=`, `<`, `<=` | Parsed as decimal; comparisons are numeric. |
+| `date` | ISO date string | `=`, `!=`, `>`, `>=`, `<`, `<=` | Use `YYYY-MM-DD`; compared as timestamps. |
+| `sourceType` | enum | `=`, `!=`, `IN`, `NOT IN` | Accepts `TECHNICIAN_WORK`, `STAFF_WORK`, `ELECTRICITY`, `OTHER`. |
+| `projectId`, `project` | string | `=`, `!=`, `IN`, `NOT IN` | Helpful for admin-wide scans across projects. |
+| `projectName` | string | `=`, `!=` | Case-insensitive match on the linked project name. |
+| `unitCode` | string | `=`, `!=` | Case-insensitive match on the unit code. |
+
+Guidelines:
+- Wrap string literals with spaces in quotes, e.g. `projectName = "Green Towers"`; numeric literals may be bare.
+- Lists for `IN`/`NOT IN` require parentheses, e.g. `sourceType IN ('ELECTRICITY','OTHER')`.
+- Only `AND` is supported today; combine multiple clauses to refine the result.
+- DSL filters run alongside `search`, explicit `sourceTypes`, and date windows—every filter must pass.
+- Invalid expressions return `status: 400` with `issues.errors[]`, enabling the agent to repair the clause.
+
+**Example**
+
+```
+amount >= 2500 AND sourceType IN ('TECHNICIAN_WORK','STAFF_WORK') AND date >= "2025-01-01"
+```
+
+Embed the line above in a dispatcher payload:
+
+```json
+{
+  "action": "LIST_UNIT_EXPENSES",
+  "senderPhone": "+966500000000",
+  "payload": {
+    "projectId": "prj_123",
+    "filterDsl": "amount >= 2500 AND sourceType IN ('TECHNICIAN_WORK','STAFF_WORK')"
+  }
+}
+```
 
 ### 2. GET `/api/webhooks/query?type=LAST_EXPENSE`
 Shortcut for summarising recent expenses. Designed for quick insights after the interpreter suggests it.
@@ -103,6 +148,18 @@ Pulls a project dashboard summary: units, residents, open tickets, technicians, 
 ---
 
 ## 📊 Accountant Webhooks
+
+### Dispatch: POST `/api/webhooks/accountants`
+Same structure as the manager dispatcher—pass `action`, `senderPhone`, and `payload`. Core action additions for finance workflows:
+
+| Action | Purpose | Required Payload Fields | Optional Fields |
+|--------|---------|-------------------------|-----------------|
+| `LIST_UNIT_EXPENSES` | Same analytics bundle as the manager endpoint | `projectId` *(or)* `projectName` | `unitCode`, `limit`, `sourceTypes[]`, `search`, `fromDate`, `toDate`, `filterDsl` |
+| `SEARCH_STAFF` | Resolve staff for advances/deductions | `query` | `projectId`, `limit`, `onlyWithPendingAdvances` |
+| `LIST_STAFF_ADVANCES` | Get pending and deducted advances | — | `query`, `status`, `projectId`, `limit` |
+| `SEARCH_ACCOUNTING_NOTES` | Fuzzy lookup for notes by text/unit/project | — | `query`, `status`, `projectId`, `unitCode`, `limit`, `includeConverted` |
+
+Use the DSL section above when enriching `LIST_UNIT_EXPENSES`; invalid clauses return a localized Arabic error so the automation can retry with corrected syntax.
 
 ### 1. GET `/api/webhooks/query?type=ACCOUNTING_DATA`
 Aggregates invoices, payments, pending amounts, and accounting notes for finance reviews.

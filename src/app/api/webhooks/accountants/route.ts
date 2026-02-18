@@ -6,6 +6,7 @@ import {
   analyzeExpenseSearch,
   buildDescriptionFilter,
   EXPENSE_SOURCE_TYPES,
+  parseExpenseFilterDsl,
   type ExpenseSourceType
 } from "@/lib/expense-search"
 import {
@@ -105,6 +106,7 @@ type ActionMap = {
     search?: string | null
     fromDate?: string | null
     toDate?: string | null
+    filterDsl?: string | null
   }
   SEARCH_STAFF: {
     query: string
@@ -1840,7 +1842,8 @@ async function handleListUnitExpenses(
     sourceTypes,
     search,
     fromDate,
-    toDate
+    toDate,
+    filterDsl
   } = payload
 
   const normalizedProjectName =
@@ -2019,13 +2022,35 @@ async function handleListUnitExpenses(
   let finalTypeSet: Set<ExpenseSourceType> | null =
     explicitSourceTypeSet.size > 0 ? new Set(explicitSourceTypeSet) : null
 
+  const hasDescriptionFilters = descriptionTokensForFilter.length > 0
+
   if (matchedSourceTypes.size > 0) {
     if (finalTypeSet) {
       finalTypeSet = new Set(
         [...finalTypeSet].filter((type) => matchedSourceTypes.has(type))
       )
-    } else {
+    } else if (!hasDescriptionFilters) {
       finalTypeSet = new Set(matchedSourceTypes)
+    }
+  }
+
+  const normalizedFilterDsl = typeof filterDsl === "string" ? filterDsl.trim() : ""
+  const filterDslResult = normalizedFilterDsl ? parseExpenseFilterDsl(normalizedFilterDsl) : { errors: [] as string[] }
+
+  if (filterDslResult.errors.length > 0) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "Invalid filterDsl expression",
+        humanReadable: {
+          ar: "صيغة فلتر المصروفات غير صحيحة. راجع الصياغة وحاول مرة أخرى."
+        },
+        issues: {
+          filterDsl,
+          errors: filterDslResult.errors
+        }
+      }
     }
   }
 
@@ -2107,6 +2132,10 @@ async function handleListUnitExpenses(
 
   if (descriptionFilter) {
     baseWhereClauses.push(descriptionFilter)
+  }
+
+  if (filterDslResult.where) {
+    baseWhereClauses.push(filterDslResult.where)
   }
 
   const currentWhereClauses = [...baseWhereClauses]

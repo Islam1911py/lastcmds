@@ -190,20 +190,435 @@ export function expandSearchToken(token: string) {
   const expansions = new Set<string>()
   const group = SEARCH_KEYWORD_GROUP_LOOKUP.get(normalized)
 
+  const baseForms = new Set<string>([token, normalized])
+
+  const arabicVariants = new Set<string>()
+
+  for (const form of baseForms) {
+    for (const variant of generateArabicVariants(form)) {
+      arabicVariants.add(variant)
+    }
+  }
+
+  for (const variant of arabicVariants) {
+    expansions.add(variant)
+  }
+
   if (group) {
     for (const term of group.terms) {
       const normalizedTerm = normalizeSearchText(term)
       if (normalizedTerm) {
-        expansions.add(term)
-        expansions.add(normalizedTerm)
+        for (const variant of generateArabicVariants(term)) {
+          expansions.add(variant)
+        }
+        for (const variant of generateArabicVariants(normalizedTerm)) {
+          expansions.add(variant)
+        }
       }
     }
   }
 
-  expansions.add(token)
-  expansions.add(normalized)
-
   return Array.from(expansions).filter(Boolean)
+}
+
+function generateArabicVariants(text: string) {
+  const variants = new Set<string>()
+
+  if (!text) {
+    return variants
+  }
+
+  const replacementMap: Record<string, string[]> = {
+    ا: ["أ", "إ", "آ", "ٱ"],
+    أ: ["ا", "إ", "آ", "ٱ"],
+    إ: ["ا", "أ", "آ", "ٱ"],
+    آ: ["ا", "أ", "إ", "ٱ"],
+    ٱ: ["ا", "أ", "إ", "آ"],
+    ه: ["ة"],
+    ة: ["ه"],
+    ي: ["ى", "ئ"],
+    ى: ["ي"],
+    ئ: ["ي"],
+    و: ["ؤ"],
+    ؤ: ["و"],
+    ض: ["ظ"],
+    ظ: ["ض"]
+  }
+
+  const queue: string[] = [text]
+
+  while (queue.length > 0) {
+    const current = queue.pop()
+    if (!current || variants.has(current)) {
+      continue
+    }
+
+    variants.add(current)
+
+    const chars = Array.from(current)
+
+    for (let index = 0; index < chars.length; index += 1) {
+      const char = chars[index]
+      const replacements = replacementMap[char]
+
+      if (!replacements || replacements.length === 0) {
+        continue
+      }
+
+      for (const replacement of replacements) {
+        const nextChars = [...chars]
+        nextChars[index] = replacement
+        const candidate = nextChars.join("")
+        if (!variants.has(candidate)) {
+          queue.push(candidate)
+        }
+      }
+    }
+  }
+
+  return variants
+}
+
+type LogicalSplitResult = {
+  conditions: string[]
+  connectors: string[]
+}
+
+function splitLogicalExpressions(input: string): LogicalSplitResult {
+  const conditions: string[] = []
+  const connectors: string[] = []
+
+  let buffer = ""
+  let index = 0
+  let inQuote: string | null = null
+
+  while (index < input.length) {
+    const char = input[index]
+
+    if (char === "\"" || char === "'") {
+      if (inQuote === char) {
+        inQuote = null
+      } else if (!inQuote) {
+        inQuote = char
+      }
+      buffer += char
+      index += 1
+      continue
+    }
+
+    if (!inQuote) {
+      const remaining = input.slice(index)
+
+      const match = /^(AND|OR)(?![A-Z])/i.exec(remaining)
+      if (match) {
+        const trimmed = buffer.trim()
+        if (trimmed) {
+          conditions.push(trimmed)
+        }
+        connectors.push(match[1].toUpperCase())
+        buffer = ""
+        index += match[0].length
+        continue
+      }
+    }
+
+    buffer += char
+    index += 1
+  }
+
+  const trailing = buffer.trim()
+  if (trailing) {
+    conditions.push(trailing)
+  }
+
+  return { conditions, connectors }
+}
+
+function parseValueToken(raw: string) {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return { value: null, type: "unknown" as const }
+  }
+
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    const unquoted = trimmed.slice(1, -1)
+    return { value: unquoted, type: "string" as const }
+  }
+
+  const numeric = Number(trimmed)
+  if (!Number.isNaN(numeric)) {
+    return { value: numeric, type: "number" as const }
+  }
+
+  return { value: trimmed, type: "string" as const }
+}
+
+function parseListValues(raw: string) {
+  const trimmed = raw.trim()
+  if (!trimmed.startsWith("(") || !trimmed.endsWith(")")) {
+    return { values: [] as Array<string | number>, error: "List value must be enclosed in parentheses" }
+  }
+
+  const inner = trimmed.slice(1, -1)
+  const results: Array<string | number> = []
+  let buffer = ""
+  let inQuote: string | null = null
+
+  for (let index = 0; index < inner.length; index += 1) {
+    const char = inner[index]
+
+    if (char === "\"" || char === "'") {
+      if (inQuote === char) {
+        inQuote = null
+      } else if (!inQuote) {
+        inQuote = char
+      }
+      buffer += char
+      continue
+    }
+
+    if (!inQuote && char === ",") {
+      const parsed = parseValueToken(buffer)
+      if (parsed.value === null) {
+        return { values: [], error: "Empty value inside list" }
+      }
+      results.push(parsed.value)
+      buffer = ""
+      continue
+    }
+
+    buffer += char
+  }
+
+  const parsed = parseValueToken(buffer)
+  if (parsed.value === null) {
+    return { values: [], error: "Empty value inside list" }
+  }
+  results.push(parsed.value)
+
+  return { values: results, error: null }
+}
+
+type ClauseBuildResult = {
+  clause?: Prisma.UnitExpenseWhereInput
+  error?: string
+}
+
+function buildClause(field: string, operator: string, rawValue: string): ClauseBuildResult {
+  const op = operator.toUpperCase()
+  const normalizedField = field.trim().toLowerCase()
+  const { value, type } = parseValueToken(rawValue)
+
+  if (value === null) {
+    return { error: `Missing value for ${field}` }
+  }
+
+  const createNumericFilter = (column: keyof Prisma.UnitExpenseWhereInput) => {
+    if (type !== "number") {
+      return { error: `${field} expects a numeric value` }
+    }
+
+    switch (op) {
+      case "=":
+        return { clause: { [column]: value } as Prisma.UnitExpenseWhereInput }
+      case "!=":
+        return { clause: { NOT: { [column]: value } } }
+      case ">":
+        return { clause: { [column]: { gt: value } as any } }
+      case ">=":
+        return { clause: { [column]: { gte: value } as any } }
+      case "<":
+        return { clause: { [column]: { lt: value } as any } }
+      case "<=":
+        return { clause: { [column]: { lte: value } as any } }
+      default:
+        return { error: `Operator ${operator} is not supported for ${field}` }
+    }
+  }
+
+  const createStringFilter = (
+    accessor: (value: string, operator: string) => Prisma.UnitExpenseWhereInput | null,
+    allowArray = false
+  ) => {
+    if (op === "IN" || op === "NOT IN") {
+      if (!allowArray) {
+        return { error: `Operator ${operator} is not supported for ${field}` }
+      }
+      const { values, error } = parseListValues(rawValue)
+      if (error) {
+        return { error }
+      }
+      if (values.some((item) => typeof item !== "string")) {
+        return { error: `${field} IN expects string values` }
+      }
+      return accessor(JSON.stringify(values), op) ? { clause: accessor(JSON.stringify(values), op) as any } : { error: `Operator ${operator} is not supported for ${field}` }
+    }
+
+    if (type !== "string") {
+      return { error: `${field} expects a string value` }
+    }
+
+    const clause = accessor(String(value), op)
+    if (!clause) {
+      return { error: `Operator ${operator} is not supported for ${field}` }
+    }
+
+    return { clause }
+  }
+
+  switch (normalizedField) {
+    case "amount":
+      return createNumericFilter("amount")
+    case "date":
+      return createStringFilter((val, operatorToken) => {
+        const dateValue = new Date(val)
+        if (Number.isNaN(dateValue.getTime())) {
+          return null
+        }
+        const column = "date"
+        switch (operatorToken) {
+          case "=":
+            return { [column]: dateValue }
+          case "!=":
+            return { NOT: { [column]: dateValue } }
+          case ">":
+            return { [column]: { gt: dateValue } }
+          case ">=":
+            return { [column]: { gte: dateValue } }
+          case "<":
+            return { [column]: { lt: dateValue } }
+          case "<=":
+            return { [column]: { lte: dateValue } }
+          default:
+            return null
+        }
+      })
+    case "sourcetype":
+      return createStringFilter((val, operatorToken) => {
+        const normalizedValue = val.toUpperCase()
+        const mapping: Prisma.UnitExpenseWhereInput = {}
+        switch (operatorToken) {
+          case "=":
+            mapping.sourceType = normalizedValue as any
+            return mapping
+          case "!=":
+            return { NOT: { sourceType: normalizedValue as any } }
+          case "IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { sourceType: { in: parsed.map((item) => item.toUpperCase()) as any } }
+          }
+          case "NOT IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { sourceType: { notIn: parsed.map((item) => item.toUpperCase()) as any } }
+          }
+          default:
+            return null
+        }
+      }, true)
+    case "projectid":
+    case "project":
+      return createStringFilter((val, operatorToken) => {
+        switch (operatorToken) {
+          case "=":
+            return { unit: { projectId: val } }
+          case "!=":
+            return { NOT: { unit: { projectId: val } } }
+          case "IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { unit: { projectId: { in: parsed } } }
+          }
+          case "NOT IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { unit: { projectId: { notIn: parsed } } }
+          }
+          default:
+            return null
+        }
+      }, true)
+    case "projectname":
+      return createStringFilter((val, operatorToken) => {
+        const base = { unit: { project: { name: { equals: val, mode: "insensitive" as const } } } }
+        switch (operatorToken) {
+          case "=":
+            return base
+          case "!=":
+            return { NOT: base }
+          default:
+            return null
+        }
+      })
+    case "unitcode":
+      return createStringFilter((val, operatorToken) => {
+        const base = { unit: { code: { equals: val, mode: "insensitive" as const } } }
+        switch (operatorToken) {
+          case "=":
+            return base
+          case "!=":
+            return { NOT: base }
+          default:
+            return null
+        }
+      })
+    default:
+      return { error: `Field ${field} is not supported in DSL filters` }
+  }
+}
+
+export function parseExpenseFilterDsl(input: string | null | undefined): {
+  where?: Prisma.UnitExpenseWhereInput
+  errors: string[]
+} {
+  if (!input) {
+    return { errors: [] }
+  }
+
+  const trimmed = input.trim()
+  if (!trimmed) {
+    return { errors: [] }
+  }
+
+  const { conditions, connectors } = splitLogicalExpressions(trimmed)
+
+  const errors: string[] = []
+
+  if (connectors.some((connector) => connector === "OR")) {
+    errors.push("OR operator is not supported yet")
+  }
+
+  const clauses: Prisma.UnitExpenseWhereInput[] = []
+  const conditionPattern = /^\s*([a-zA-Z_.]+)\s*(<=|>=|!=|=|<|>|IN|NOT\s+IN)\s*(.+)$/i
+
+  for (const condition of conditions) {
+    const match = conditionPattern.exec(condition)
+
+    if (!match) {
+      errors.push(`Unable to parse condition: ${condition}`)
+      continue
+    }
+
+    const field = match[1]
+    const rawOperator = match[2].replace(/\s+/g, " ").toUpperCase()
+    const value = match[3]
+
+    const { clause, error } = buildClause(field, rawOperator, value)
+    if (error) {
+      errors.push(error)
+      continue
+    }
+    if (clause) {
+      clauses.push(clause)
+    }
+  }
+
+  if (errors.length > 0 || clauses.length === 0) {
+    return { errors, where: clauses.length ? { AND: clauses } : undefined }
+  }
+
+  if (clauses.length === 1) {
+    return { errors, where: clauses[0] }
+  }
+
+  return { errors, where: { AND: clauses } }
 }
 
 type DescriptionFilter = {
@@ -324,9 +739,6 @@ export function analyzeExpenseSearch(rawSearchTerm: string): ExpenseSearchAnalys
 
     if (matchedEntry) {
       matchedSourceTypes.add(matchedEntry.type)
-      if (matchedEntry.type !== "OTHER") {
-        continue
-      }
     }
 
     if (!seenTokens.has(token)) {
