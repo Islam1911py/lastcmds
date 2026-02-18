@@ -1264,6 +1264,8 @@ async function handleSearchAccountingNotes(
 
   const whereClauses: Prisma.AccountingNoteWhereInput[] = []
 
+  const normalizedStatusFilter = status && status !== "ALL" ? status : null
+
   if (descriptionTokens.length > 0) {
     const descriptionFilter = buildDescriptionFilter(descriptionTokens)
     if (descriptionFilter) {
@@ -1308,9 +1310,12 @@ async function handleSearchAccountingNotes(
     whereClauses.push({ OR: searchOr })
   }
 
-  if (status && status !== "ALL") {
-    whereClauses.push({ status })
-  } else if (!includeConverted) {
+  const includeConvertedExplicitly = includeConverted === true
+  const applyConvertedExclusion = !normalizedStatusFilter && !includeConvertedExplicitly && !normalizedQuery
+
+  if (normalizedStatusFilter) {
+    whereClauses.push({ status: normalizedStatusFilter })
+  } else if (applyConvertedExclusion) {
     whereClauses.push({ status: { not: "CONVERTED" } })
   }
 
@@ -1406,26 +1411,55 @@ async function handleSearchAccountingNotes(
     return acc
   }, {})
 
+  const statusLabels: Record<string, string> = {
+    PENDING: "قيد في انتظار المعالجة",
+    CONVERTED: "تم تحويله لمصروف",
+    REJECTED: "مرفوض"
+  }
+
+  const topNotes = items.slice(0, 6)
+  const summaryLines = topNotes.map((note) => {
+    const dateLabel = formatDate(note.createdAt) ?? "—"
+    const amountLabel = formatCurrency(note.amount ?? 0)
+    const statusLabel = statusLabels[note.status] ?? note.status
+    const unitLabel = note.unitCode ? ` • الوحدة ${note.unitCode}` : ""
+    return `- ${dateLabel}${unitLabel}: ${amountLabel} جنيه — ${note.description ?? "(بدون وصف)"} (${statusLabel})`
+  })
+
+  const moreCount = Math.max(items.length - summaryLines.length, 0)
+
+  const humanReadableAr = items.length
+    ? [
+        `وجدت ${items.length} قيود بقيمة إجمالية ${formatCurrency(totalAmount)} جنيه${normalizedQuery ? ` للبحث عن "${normalizedQuery}"` : ""}.`,
+        ...summaryLines,
+        moreCount > 0 ? `- (+${moreCount} قيود إضافية) ...` : null
+      ]
+        .filter(Boolean)
+        .join("\n")
+    : "لا توجد قيود محاسبية مطابقة للمحددات."
+
+  const effectiveIncludeConverted = normalizedStatusFilter
+    ? normalizedStatusFilter === "CONVERTED"
+    : !applyConvertedExclusion
+
   return {
     status: 200,
     body: {
       success: true,
       data: {
-        notes: items
+        notes: items,
+        summary: humanReadableAr,
+        topNotes: topNotes
       },
-      humanReadable: items.length
-        ? {
-            ar: `تم العثور على ${items.length} قيود محاسبية بإجمالي ${formatCurrency(totalAmount)}.`
-          }
-        : {
-            ar: "لا توجد قيود محاسبية مطابقة للمحددات."
-          },
+      humanReadable: {
+        ar: humanReadableAr
+      },
       meta: {
         filters: {
           status: status ?? "ALL",
           projectId: projectId ?? null,
           unitCode: unitCode ?? null,
-          includeConverted: Boolean(includeConverted)
+          includeConverted: effectiveIncludeConverted
         },
         totals: {
           count: items.length,
@@ -2151,62 +2185,291 @@ async function handleListUnitExpenses(
         ? currentWhereClauses[0]
         : { AND: currentWhereClauses }
 
+  const sharedExpenseInclude = {
+    unit: {
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        project: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    },
+    recordedByUser: {
+      select: {
+        id: true,
+        name: true,
+        email: true
+      }
+    },
+    pmAdvance: {
+      select: {
+        id: true,
+        amount: true,
+        remainingAmount: true,
+        staff: {
+          select: {
+            id: true,
+            name: true
+          }
+        }
+      }
+    }
+  } as const
+
   const take = parseLimit(limit, 25, 100)
 
-  const expenses = shouldSkipQuery
+  const unitExpenses = shouldSkipQuery
     ? []
-    : (await db.unitExpense.findMany({
+    : await db.unitExpense.findMany({
         where: whereClause,
-        include: {
-          unit: {
-            select: {
-              id: true,
-              code: true,
-              name: true,
-              project: {
-                select: {
-                  id: true,
-                  name: true
-                }
-              }
-            }
-          },
-          recordedByUser: {
-            select: {
-              id: true,
-              name: true,
-              email: true
-            }
-          },
-          pmAdvance: {
-            select: {
-              id: true,
-              amount: true,
-              remainingAmount: true,
-              staff: {
-                select: {
-                  id: true,
-                  name: true
-                }
-              }
-            }
-          }
-        },
+        include: sharedExpenseInclude,
         orderBy: { date: "desc" },
         take
-      }))
+      })
 
-  const totalAmount = expenses.reduce((sum, expense) => sum + (expense.amount ?? 0), 0)
+  type ConvertedExclusionReason = "SKIPPED_QUERY" | "SOURCE_TYPE_FILTER" | "FILTER_DSL_APPLIED"
 
-  const sourceBreakdown = expenses.reduce((acc, expense) => {
+  let convertedExclusionReason: ConvertedExclusionReason | null = null
+
+  if (shouldSkipQuery) {
+    convertedExclusionReason = "SKIPPED_QUERY"
+  } else if (finalTypeSet && finalTypeSet.size > 0 && !finalTypeSet.has("OTHER")) {
+    convertedExclusionReason = "SOURCE_TYPE_FILTER"
+  } else if (filterDslResult.where) {
+    convertedExclusionReason = "FILTER_DSL_APPLIED"
+  }
+
+  const includeConvertedNotes = convertedExclusionReason === null
+
+  const normalizedOperationalDateFilters: Prisma.DateTimeFilter = {}
+  if (dateFilters.gte) {
+    normalizedOperationalDateFilters.gte = dateFilters.gte
+  }
+  if (dateFilters.lte) {
+    normalizedOperationalDateFilters.lte = dateFilters.lte
+  }
+
+  const buildOperationalWhereClauses = (
+    dateFilter?: Prisma.DateTimeFilter
+  ): Prisma.OperationalExpenseWhereInput => {
+    const clauses: Prisma.OperationalExpenseWhereInput[] = [
+      {
+        convertedFromNoteId: {
+          not: null
+        }
+      }
+    ]
+
+    if (project) {
+      clauses.push({
+        unit: {
+          projectId: project.id
+        }
+      })
+    }
+
+    if (unit) {
+      clauses.push({ unitId: unit.id })
+    }
+
+    if (descriptionFilter) {
+      clauses.push(descriptionFilter as unknown as Prisma.OperationalExpenseWhereInput)
+    }
+
+    if (dateFilter && Object.keys(dateFilter).length > 0) {
+      clauses.push({ recordedAt: dateFilter })
+    }
+
+    return clauses.length === 1
+      ? clauses[0]
+      : { AND: clauses }
+  }
+
+  const convertedExpenseInclude = {
+    ...sharedExpenseInclude,
+    accountingNote: {
+      select: {
+        id: true,
+        description: true,
+        convertedAt: true,
+        status: true,
+        amount: true
+      }
+    }
+  } as const
+
+  type ConvertedExpenseRecord = Prisma.OperationalExpenseGetPayload<{
+    include: typeof convertedExpenseInclude
+  }>
+
+  let convertedOperationalExpenses: ConvertedExpenseRecord[] = []
+
+  if (includeConvertedNotes) {
+    const operationalWhere = buildOperationalWhereClauses(normalizedOperationalDateFilters)
+
+    convertedOperationalExpenses = await db.operationalExpense.findMany({
+      where: operationalWhere,
+      include: convertedExpenseInclude,
+      orderBy: { recordedAt: "desc" },
+      take
+    })
+  }
+
+  type UnitExpenseRecord = (typeof unitExpenses)[number]
+
+  type NormalizedExpense = {
+    id: string
+    unitId: string
+    pmAdvanceId: string | null
+    date: Date | null
+    recordedAt: Date | null
+    description: string | null
+    amount: number
+    sourceType: ExpenseSourceType
+    recordedByUserId: string | null
+    unit: {
+      id: string
+      code: string | null
+      name: string | null
+      project: {
+        id: string
+        name: string | null
+      } | null
+    } | null
+    recordedByUser: {
+      id: string
+      name: string | null
+      email: string | null
+    } | null
+    pmAdvance: {
+      id: string
+      amount: number
+      remainingAmount: number
+      staff: {
+        id: string
+        name: string | null
+      } | null
+    } | null
+    createdAt: Date | null
+    updatedAt: Date | null
+    recordKind: "UNIT" | "CONVERTED_NOTE"
+    operationalSourceType: string | null
+    accountingNoteId: string | null
+    accountingNoteDescription: string | null
+    accountingNoteConvertedAt: Date | null
+    accountingNoteStatus: string | null
+    convertedOperationalExpenseId: string | null
+    convertedFromNoteId: string | null
+    originalUnitExpenseId: string | null
+  }
+
+  const normalizeUnitExpense = (expense: UnitExpenseRecord): NormalizedExpense => {
+    const fallbackDate = expense.date ?? expense.createdAt ?? null
+
+    return {
+      id: expense.id,
+      unitId: expense.unitId,
+      pmAdvanceId: expense.pmAdvanceId ?? null,
+      date: fallbackDate,
+      recordedAt: fallbackDate,
+      description: expense.description ?? null,
+      amount: Number(expense.amount ?? 0),
+      sourceType: expense.sourceType as ExpenseSourceType,
+      recordedByUserId: expense.recordedByUserId ?? null,
+      unit: expense.unit ?? null,
+      recordedByUser: expense.recordedByUser ?? null,
+      pmAdvance: expense.pmAdvance ?? null,
+      createdAt: expense.createdAt ?? null,
+      updatedAt: expense.updatedAt ?? null,
+      recordKind: "UNIT",
+      operationalSourceType: null,
+      accountingNoteId: null,
+      accountingNoteDescription: null,
+      accountingNoteConvertedAt: null,
+      accountingNoteStatus: null,
+      convertedOperationalExpenseId: null,
+      convertedFromNoteId: null,
+      originalUnitExpenseId: expense.id
+    }
+  }
+
+  const normalizeConvertedExpense = (expense: ConvertedExpenseRecord): NormalizedExpense => {
+    const recordedAt = expense.recordedAt ?? expense.createdAt ?? null
+
+    return {
+      id: expense.id,
+      unitId: expense.unitId,
+      pmAdvanceId: expense.pmAdvanceId ?? null,
+      date: recordedAt,
+      recordedAt,
+      description: expense.description ?? null,
+      amount: Number(expense.amount ?? 0),
+      sourceType: "OTHER",
+      recordedByUserId: expense.recordedByUserId ?? null,
+      unit: expense.unit ?? null,
+      recordedByUser: expense.recordedByUser ?? null,
+      pmAdvance: expense.pmAdvance ?? null,
+      createdAt: expense.createdAt ?? null,
+      updatedAt: expense.updatedAt ?? null,
+      recordKind: "CONVERTED_NOTE",
+      operationalSourceType: expense.sourceType ?? null,
+      accountingNoteId: expense.accountingNote?.id ?? null,
+      accountingNoteDescription: expense.accountingNote?.description ?? null,
+      accountingNoteConvertedAt: expense.accountingNote?.convertedAt ?? null,
+      accountingNoteStatus: expense.accountingNote?.status ?? null,
+      convertedOperationalExpenseId: expense.id,
+      convertedFromNoteId: expense.convertedFromNoteId ?? null,
+      originalUnitExpenseId: null
+    }
+  }
+
+  const normalizedUnitExpenses = unitExpenses.map(normalizeUnitExpense)
+  const normalizedConvertedExpenses = convertedOperationalExpenses.map(normalizeConvertedExpense)
+
+  const combinedExpenses: NormalizedExpense[] = [
+    ...normalizedUnitExpenses,
+    ...normalizedConvertedExpenses
+  ]
+
+  combinedExpenses.sort((a, b) => {
+    const aTime = a.date ? new Date(a.date).getTime() : a.recordedAt ? new Date(a.recordedAt).getTime() : 0
+    const bTime = b.date ? new Date(b.date).getTime() : b.recordedAt ? new Date(b.recordedAt).getTime() : 0
+    return bTime - aTime
+  })
+
+  const finalExpenses = combinedExpenses.slice(0, take)
+
+  const totalAmount = finalExpenses.reduce((sum, expense) => sum + expense.amount, 0)
+
+  const sourceBreakdown = finalExpenses.reduce((acc, expense) => {
     const key = expense.sourceType as ExpenseSourceType
     acc[key] = acc[key] ?? { count: 0, amount: 0 }
     acc[key].count += 1
-    acc[key].amount += expense.amount ?? 0
+    acc[key].amount += expense.amount
     return acc
   }, {} as Record<ExpenseSourceType, { count: number; amount: number }>)
 
-  const averageExpense = expenses.length > 0 ? Number((totalAmount / expenses.length).toFixed(2)) : 0
+  const averageExpense = finalExpenses.length > 0 ? Number((totalAmount / finalExpenses.length).toFixed(2)) : 0
+
+  const convertedCountInFinal = finalExpenses.filter((expense) => expense.recordKind === "CONVERTED_NOTE").length
+  const unitCountInFinal = finalExpenses.length - convertedCountInFinal
+
+  const amountByRecordKind = finalExpenses.reduce(
+    (acc, expense) => {
+      if (expense.recordKind === "CONVERTED_NOTE") {
+        acc.converted += expense.amount
+      } else {
+        acc.unit += expense.amount
+      }
+      return acc
+    },
+    { unit: 0, converted: 0 }
+  )
 
   let topCategory: {
     type: ExpenseSourceType
@@ -2264,8 +2527,27 @@ async function handleListUnitExpenses(
       _sum: { amount: true }
     })
 
-    const previousTotalRaw = previousAggregate._sum.amount ?? 0
-    const previousTotal = typeof previousTotalRaw === "number" ? previousTotalRaw : Number(previousTotalRaw)
+    const previousUnitTotalRaw = previousAggregate._sum.amount ?? 0
+    const previousUnitTotal =
+      typeof previousUnitTotalRaw === "number"
+        ? previousUnitTotalRaw
+        : Number(previousUnitTotalRaw)
+
+    let previousTotal = previousUnitTotal
+
+    if (includeConvertedNotes) {
+      const previousOperationalWhere = buildOperationalWhereClauses(previousDateFilter)
+      const previousOperationalAggregate = await db.operationalExpense.aggregate({
+        where: previousOperationalWhere,
+        _sum: { amount: true }
+      })
+      const previousOperationalTotalRaw = previousOperationalAggregate._sum.amount ?? 0
+      const previousOperationalTotal =
+        typeof previousOperationalTotalRaw === "number"
+          ? previousOperationalTotalRaw
+          : Number(previousOperationalTotalRaw)
+      previousTotal += previousOperationalTotal
+    }
 
     let direction: TrendDirection = "NO_DATA"
     let percentageChange: number | null = null
@@ -2319,12 +2601,19 @@ async function handleListUnitExpenses(
     }
   }
 
-  const topExpenses = expenses.slice(0, 5)
+  const topExpenses = finalExpenses.slice(0, 5)
 
   const reportLines: string[] = []
   reportLines.push("📊 تقرير المصروفات")
   reportLines.push(`• الإجمالي: ${formatCurrency(totalAmount)} جنيه`)
-  reportLines.push(`• عدد العمليات: ${expenses.length}`)
+  reportLines.push(`• عدد العمليات: ${finalExpenses.length}`)
+  if (convertedCountInFinal > 0) {
+    reportLines.push(
+      convertedCountInFinal === 1
+        ? "• يشمل مصروفًا محولًا من الملاحظات."
+        : `• يشمل ${convertedCountInFinal} مصروفات محولة من الملاحظات.`
+    )
+  }
   if (appliedSourceTypesForFilter.length > 0 || matchedSourceTypes.size > 0) {
     const appliedTypes = appliedSourceTypesForFilter.length
       ? appliedSourceTypesForFilter
@@ -2342,7 +2631,7 @@ async function handleListUnitExpenses(
       `• الفترة: ${formatDate(fromDateValue) ?? "—"} → ${formatDate(toDateValue) ?? "—"}`
     )
   }
-  if (expenses.length > 0) {
+  if (finalExpenses.length > 0) {
     reportLines.push(`• متوسط العملية: ${formatCurrency(averageExpense)} جنيه`)
   }
   if (topCategory) {
@@ -2387,19 +2676,20 @@ async function handleListUnitExpenses(
     for (const expense of topExpenses) {
       const unitLabel = expense.unit?.code ?? expense.unit?.name ?? "—"
       const description = expense.description?.trim() || "(بدون وصف)"
-      const amountLabel = formatCurrency(expense.amount ?? 0)
-      const dateLabel = formatDate(expense.date) ?? "—"
-      reportLines.push(`- ${dateLabel} • ${unitLabel}: ${amountLabel} جنيه — ${description}`)
+      const amountLabel = formatCurrency(expense.amount)
+      const dateLabel = formatDate(expense.date ?? expense.recordedAt) ?? "—"
+      const convertedMarker = expense.recordKind === "CONVERTED_NOTE" ? " [محولة]" : ""
+      reportLines.push(`- ${dateLabel} • ${unitLabel}: ${amountLabel} جنيه — ${description}${convertedMarker}`)
     }
-    if (expenses.length > topExpenses.length) {
-      reportLines.push(`- (+${expenses.length - topExpenses.length} مصروف إضافي) ...`)
+    if (finalExpenses.length > topExpenses.length) {
+      reportLines.push(`- (+${finalExpenses.length - topExpenses.length} مصروف إضافي) ...`)
     }
   }
 
   const structuredReport = {
     summary: reportLines.join("\n"),
     totalAmount,
-    rawCount: expenses.length,
+    rawCount: finalExpenses.length,
     averageExpense,
     topCategory: topCategory
       ? {
@@ -2421,15 +2711,31 @@ async function handleListUnitExpenses(
       : null,
     topExpenses: topExpenses.map((expense) => ({
       id: expense.id,
+      recordKind: expense.recordKind,
+      operationalSourceType: expense.operationalSourceType,
+      accountingNoteId: expense.accountingNoteId,
+      accountingNoteDescription: expense.accountingNoteDescription,
+      accountingNoteConvertedAt: expense.accountingNoteConvertedAt,
+      accountingNoteStatus: expense.accountingNoteStatus,
       unitCode: expense.unit?.code ?? null,
       unitName: expense.unit?.name ?? null,
       projectId: expense.unit?.project?.id ?? null,
       projectName: expense.unit?.project?.name ?? null,
       description: expense.description,
       amount: expense.amount,
-      date: expense.date,
+      date: expense.date ?? expense.recordedAt ?? null,
       sourceType: expense.sourceType
     })),
+    recordComposition: {
+      unit: {
+        count: unitCountInFinal,
+        amount: Number(amountByRecordKind.unit.toFixed(2))
+      },
+      converted: {
+        count: convertedCountInFinal,
+        amount: Number(amountByRecordKind.converted.toFixed(2))
+      }
+    },
     filters: {
       projectId: project?.id ?? null,
       projectName: project?.name ?? null,
@@ -2437,52 +2743,71 @@ async function handleListUnitExpenses(
       search: rawSearchTerm,
       fromDate: fromDateValue ? formatDate(fromDateValue) : null,
       toDate: toDateValue ? formatDate(toDateValue) : null,
-      sourceTypes: appliedSourceTypesForFilter
+      sourceTypes: appliedSourceTypesForFilter,
+      includeConvertedNotes
     }
   }
 
   const projectLabel = project?.name ?? project?.id ?? "all projects"
   const unitLabel = unit?.code ?? null
 
-  const humanReadable: HumanReadable = expenses.length
+  const humanReadable: HumanReadable = finalExpenses.length
     ? {
-        ar: `تم العثور على ${expenses.length} مصروف${expenses.length === 1 ? "" : "ات"} للوحدات ضمن ${projectLabel}${unitLabel ? ` (الوحدة ${unitLabel})` : ""} بإجمالي ${formatCurrency(totalAmount)}.`
+        ar: `تم العثور على ${finalExpenses.length} مصروف${finalExpenses.length === 1 ? "" : "ات"} للوحدات ضمن ${projectLabel}${unitLabel ? ` (الوحدة ${unitLabel})` : ""} بإجمالي ${formatCurrency(totalAmount)}${convertedCountInFinal > 0 ? " (يتضمن مصروفات محولة من الملاحظات)." : "."}`
       }
     : {
         ar: "لا توجد مصروفات وحدات مطابقة للمحددات."
       }
 
-  const suggestions: Suggestion[] = expenses.length
-    ? [
-        {
-          title: "تحليل حسب المصدر",
-          prompt: "حلل لي المصروفات دي حسب نوع المصدر وسلمني الإجمالي لكل نوع.",
-          data: {
-            projectId: project?.id ?? null,
-            projectName: project?.name ?? null,
-            unitCode: unit?.code ?? null,
-            search: rawSearchTerm
-          }
-        },
-        {
-          title: "أحدث مصروف",
-          prompt: "هات تفاصيل أحدث مصروف في القائمة اللي استرجعتها.",
-          data: {
-            expenseId: expenses[0]?.id ?? null
-          }
+  const suggestions: Suggestion[] = []
+
+  if (finalExpenses.length > 0) {
+    suggestions.push({
+      title: "تحليل حسب المصدر",
+      prompt: "حلل لي المصروفات دي حسب نوع المصدر وسلمني الإجمالي لكل نوع.",
+      data: {
+        projectId: project?.id ?? null,
+        projectName: project?.name ?? null,
+        unitCode: unit?.code ?? null,
+        search: rawSearchTerm
+      }
+    })
+
+    const firstUnitExpense = finalExpenses.find((expense) => expense.recordKind === "UNIT")
+    if (firstUnitExpense) {
+      suggestions.push({
+        title: "أحدث مصروف",
+        prompt: "هات تفاصيل أحدث مصروف في القائمة اللي استرجعتها.",
+        data: {
+          expenseId: firstUnitExpense.id,
+          recordKind: firstUnitExpense.recordKind
         }
-      ]
-    : [
-        {
-          title: "تخفيف المحددات",
-          prompt: "خفف الفلاتر أو وسّع نطاق التاريخ وجرب مرة تانية.",
-          data: {
-            projectId: project?.id ?? null,
-            unitCode,
-            search: rawSearchTerm
-          }
+      })
+    }
+
+    const firstConvertedExpense = finalExpenses.find((expense) => expense.recordKind === "CONVERTED_NOTE" && expense.accountingNoteId)
+    if (firstConvertedExpense && firstConvertedExpense.accountingNoteId) {
+      suggestions.push({
+        title: "ملاحظة محولة",
+        prompt: "هات تفاصيل الملاحظة المحولة المرتبطة بالمصروف ده.",
+        data: {
+          accountingNoteId: firstConvertedExpense.accountingNoteId,
+          expenseId: firstConvertedExpense.id,
+          recordKind: firstConvertedExpense.recordKind
         }
-      ]
+      })
+    }
+  } else {
+    suggestions.push({
+      title: "تخفيف المحددات",
+      prompt: "خفف الفلاتر أو وسّع نطاق التاريخ وجرب مرة تانية.",
+      data: {
+        projectId: project?.id ?? null,
+        unitCode,
+        search: rawSearchTerm
+      }
+    })
+  }
 
   const tokenVariants = searchAnalysis
     ? Object.fromEntries(Array.from(searchAnalysis.tokenVariants.entries()))
@@ -2493,14 +2818,14 @@ async function handleListUnitExpenses(
     body: {
       success: true,
       data: {
-        expenses,
+        expenses: finalExpenses,
         report: structuredReport
       },
       meta: {
         projectId: project?.id ?? null,
         projectName: project?.name ?? null,
         unitCode: unit?.code ?? null,
-        count: expenses.length,
+        count: finalExpenses.length,
         totalAmount,
         filteredSourceTypes: appliedSourceTypesForFilter,
         requestedSourceTypes: explicitSourceTypes,
@@ -2535,11 +2860,29 @@ async function handleListUnitExpenses(
               reason: trendInfo.reason ?? null
             }
           : null,
+        recordComposition: {
+          unit: {
+            count: unitCountInFinal,
+            amount: Number(amountByRecordKind.unit.toFixed(2))
+          },
+          converted: {
+            count: convertedCountInFinal,
+            amount: Number(amountByRecordKind.converted.toFixed(2))
+          }
+        },
+        convertedNotes: {
+          included: includeConvertedNotes,
+          includedCount: convertedCountInFinal,
+          fetchedCount: normalizedConvertedExpenses.length,
+          exclusionReason: convertedExclusionReason,
+          amount: Number(amountByRecordKind.converted.toFixed(2))
+        },
+        limit: take,
         reportSummary: structuredReport.summary
       },
       humanReadable,
       suggestions,
-      message: expenses.length === 0 ? "لا توجد مصروفات مطابقة للمحددات الحالية" : undefined
+      message: finalExpenses.length === 0 ? "لا توجد مصروفات مطابقة للمحددات الحالية" : undefined
     }
   }
 }
