@@ -7,6 +7,7 @@ import {
   buildDescriptionFilter,
   EXPENSE_SOURCE_TYPES,
   parseExpenseFilterDsl,
+  parseInvoiceFilterDsl,
   type ExpenseSourceType
 } from "@/lib/expense-search"
 import {
@@ -41,6 +42,7 @@ const ALLOWED_ACTIONS = [
   "CREATE_PAYROLL",
   "PAY_PAYROLL",
   "LIST_UNIT_EXPENSES",
+  "LIST_INVOICES",
   "SEARCH_STAFF",
   "LIST_STAFF_ADVANCES",
   "SEARCH_ACCOUNTING_NOTES"
@@ -104,6 +106,17 @@ type ActionMap = {
       "TECHNICIAN_WORK" | "STAFF_WORK" | "ELECTRICITY" | "OTHER"
     >
     search?: string | null
+    fromDate?: string | null
+    toDate?: string | null
+    filterDsl?: string | null
+  }
+  LIST_INVOICES: {
+    projectId?: string | null
+    projectName?: string | null
+    unitCode?: string | null
+    isPaid?: boolean | null
+    invoiceType?: "CLAIM" | null
+    limit?: number | string
     fromDate?: string | null
     toDate?: string | null
     filterDsl?: string | null
@@ -2887,6 +2900,312 @@ async function handleListUnitExpenses(
   }
 }
 
+async function handleListInvoices(
+  accountant: AccountantRecord,
+  payload: ActionMap["LIST_INVOICES"]
+): Promise<HandlerResponse> {
+  const {
+    projectId: rawProjectId,
+    projectName,
+    unitCode,
+    isPaid,
+    invoiceType,
+    limit,
+    fromDate,
+    toDate,
+    filterDsl
+  } = payload
+
+  const normalizedProjectName =
+    typeof projectName === "string" && projectName.trim().length > 0
+      ? projectName.trim()
+      : null
+
+  let resolvedProjectId = typeof rawProjectId === "string" && rawProjectId.trim().length > 0
+    ? rawProjectId.trim()
+    : null
+
+  let project: { id: string; name: string | null } | null = null
+
+  if (normalizedProjectName && !resolvedProjectId) {
+    const candidates = await db.project.findMany({
+      select: { id: true, name: true },
+      orderBy: { name: "asc" }
+    })
+
+    const lowerSearch = normalizedProjectName.toLowerCase()
+    const matchedCandidates = candidates.filter((candidate) =>
+      candidate.name ? candidate.name.toLowerCase().includes(lowerSearch) : false
+    )
+
+    const exactMatch = matchedCandidates.find((candidate) =>
+      candidate.name
+        ? candidate.name.toLowerCase().trim() === lowerSearch
+        : false
+    )
+
+    if (exactMatch) {
+      project = exactMatch
+    } else if (matchedCandidates.length === 1) {
+      project = matchedCandidates[0]
+    }
+
+    if (!project) {
+      return {
+        status: matchedCandidates.length > 1 ? 409 : 404,
+        body: {
+          success: false,
+          error: matchedCandidates.length > 1 ? "Project name ambiguous" : "Project not found",
+          humanReadable: {
+            ar: matchedCandidates.length > 1
+              ? "اسم المشروع يطابق أكثر من مشروع. حدد الاسم الكامل من القائمة."
+              : "لم أجد مشروعًا بهذا الاسم أثناء البحث عن الفواتير."
+          },
+          issues: {
+            projectName: normalizedProjectName,
+            matchedProjectNames: matchedCandidates.map((c) => c.name)
+          }
+        }
+      }
+    }
+
+    resolvedProjectId = project.id
+  }
+
+  if (resolvedProjectId) {
+    project = await db.project.findUnique({
+      where: { id: resolvedProjectId },
+      select: { id: true, name: true }
+    })
+
+    if (!project) {
+      return {
+        status: 404,
+        body: {
+          success: false,
+          error: "Project not found",
+          humanReadable: { ar: "لم أجد المشروع المطلوب." }
+        }
+      }
+    }
+  }
+
+  let unit: { id: string; code: string | null; projectId: string } | null = null
+
+  if (unitCode) {
+    unit = await db.operationalUnit.findFirst({
+      where: {
+        code: unitCode,
+        ...(project ? { projectId: project.id } : {})
+      },
+      select: { id: true, code: true, projectId: true }
+    })
+
+    if (!unit) {
+      return {
+        status: 404,
+        body: {
+          success: false,
+          error: "Operational unit not found",
+          humanReadable: { ar: "لم أجد هذه الوحدة." },
+          issues: { unitCode }
+        }
+      }
+    }
+  }
+
+  let fromDateValue: Date | null = null
+  let toDateValue: Date | null = null
+
+  try {
+    fromDateValue = parseDateInput(fromDate, "fromDate")
+    toDateValue = parseDateInput(toDate, "toDate")
+  } catch (error) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: (error as Error).message,
+        humanReadable: { ar: "صيغة التاريخ غير صحيحة. استخدم YYYY-MM-DD." }
+      }
+    }
+  }
+
+  if (fromDateValue && toDateValue && fromDateValue > toDateValue) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "fromDate must be before toDate",
+        humanReadable: { ar: "تاريخ البداية يجب أن يكون قبل تاريخ النهاية." }
+      }
+    }
+  }
+
+  if (fromDateValue) {
+    fromDateValue.setHours(0, 0, 0, 0)
+  }
+  if (toDateValue) {
+    toDateValue.setHours(23, 59, 59, 999)
+  }
+
+  const normalizedFilterDsl = typeof filterDsl === "string" ? filterDsl.trim() : ""
+  const filterDslResult = normalizedFilterDsl ? parseInvoiceFilterDsl(normalizedFilterDsl) : { errors: [] as string[] }
+
+  if (filterDslResult.errors.length > 0) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "Invalid filterDsl expression",
+        humanReadable: { ar: "صيغة فلتر DSL غير صحيحة. راجع الصياغة وحاول مرة أخرى." },
+        issues: {
+          filterDsl,
+          errors: filterDslResult.errors
+        }
+      }
+    }
+  }
+
+  const dateFilters: Prisma.DateTimeFilter = {}
+  if (fromDateValue) {
+    dateFilters.gte = fromDateValue
+  }
+  if (toDateValue) {
+    dateFilters.lte = toDateValue
+  }
+
+  const whereClauses: Prisma.InvoiceWhereInput[] = []
+
+  if (project) {
+    whereClauses.push({
+      unit: { projectId: project.id }
+    })
+  }
+
+  if (unit) {
+    whereClauses.push({ unitId: unit.id })
+  }
+
+  if (isPaid !== null && isPaid !== undefined) {
+    whereClauses.push({
+      isPaid: isPaid === true
+    })
+  }
+
+  const resolvedInvoiceType = invoiceType ?? "CLAIM"
+  whereClauses.push({ type: resolvedInvoiceType })
+
+  if (Object.keys(dateFilters).length > 0) {
+    whereClauses.push({ issuedAt: dateFilters })
+  }
+
+  if (filterDslResult.where) {
+    whereClauses.push(filterDslResult.where as unknown as Prisma.InvoiceWhereInput)
+  }
+
+  const where: Prisma.InvoiceWhereInput =
+    whereClauses.length === 0
+      ? {}
+      : whereClauses.length === 1
+        ? whereClauses[0]
+        : { AND: whereClauses }
+
+  const take = parseLimit(limit, 25, 100)
+
+  const invoices = await db.invoice.findMany({
+    where,
+    include: {
+      unit: {
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          project: {
+            select: { id: true, name: true }
+          }
+        }
+      },
+      ownerAssociation: {
+        select: {
+          id: true,
+          name: true
+        }
+      },
+      payments: {
+        select: { id: true, amount: true, createdAt: true }
+      }
+    },
+    orderBy: { issuedAt: "desc" },
+    take
+  })
+
+  const totalAmount = invoices.reduce((sum, inv) => sum + (inv.amount ?? 0), 0)
+  const remainingBalance = invoices.reduce((sum, inv) => sum + (inv.remainingBalance ?? 0), 0)
+  const paidCount = invoices.filter((inv) => inv.isPaid).length
+  const unpaidCount = invoices.length - paidCount
+
+  const items = invoices.map((inv) => ({
+    id: inv.id,
+    invoiceNumber: inv.invoiceNumber,
+    type: inv.type,
+    unitCode: inv.unit?.code ?? null,
+    unitName: inv.unit?.name ?? null,
+    projectId: inv.unit?.project?.id ?? null,
+    projectName: inv.unit?.project?.name ?? null,
+    amount: inv.amount,
+    totalPaid: inv.totalPaid,
+    remainingBalance: inv.remainingBalance,
+    isPaid: inv.isPaid,
+    issuedAt: inv.issuedAt,
+    paymentCount: inv.payments?.length ?? 0
+  }))
+
+  const projectLabel = project?.name ?? project?.id ?? "جميع المشاريع"
+  const unitLabel = unit?.code ?? null
+  const paidLabel = isPaid !== null && isPaid !== undefined
+    ? (isPaid ? "مدفوعة" : "غير مدفوعة")
+    : "الكل"
+
+  const humanReadable: HumanReadable = items.length
+    ? {
+        ar: `تم العثور على ${items.length} فاتورة${items.length === 1 ? "" : "ة"} (${paidLabel}) ضمن ${projectLabel}${unitLabel ? ` (الوحدة ${unitLabel})` : ""} بإجمالي ${formatCurrency(totalAmount)} جنيه${remainingBalance > 0 ? ` (${formatCurrency(remainingBalance)} متبقي)` : ""}.`
+      }
+    : {
+        ar: "لا توجد فواتير مطابقة للمحددات."
+      }
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      data: {
+        invoices: items
+      },
+      humanReadable,
+      meta: {
+        projectId: project?.id ?? null,
+        projectName: project?.name ?? null,
+        unitCode: unit?.code ?? null,
+        isPaid: isPaid ?? null,
+        invoiceType: resolvedInvoiceType,
+        count: items.length,
+        totalAmount: Number(totalAmount.toFixed(2)),
+        totalPaid: Number(invoices.reduce((s, i) => s + (i.totalPaid ?? 0), 0).toFixed(2)),
+        remainingBalance: Number(remainingBalance.toFixed(2)),
+        paidCount,
+        unpaidCount,
+        dateFilter: {
+          from: formatDate(fromDateValue),
+          to: formatDate(toDateValue)
+        },
+        limit: take
+      },
+      message: items.length === 0 ? "لا توجد فواتير مطابقة للمحددات الحالية" : undefined
+    }
+  }
+}
+
 const HANDLERS: { [K in AllowedAction]: ActionHandler<K> } = {
   CREATE_PM_ADVANCE: handleCreatePmAdvance,
   CREATE_STAFF_ADVANCE: handleCreateStaffAdvance,
@@ -2897,6 +3216,7 @@ const HANDLERS: { [K in AllowedAction]: ActionHandler<K> } = {
   CREATE_PAYROLL: handleCreatePayroll,
   PAY_PAYROLL: handlePayPayroll,
   LIST_UNIT_EXPENSES: handleListUnitExpenses,
+  LIST_INVOICES: handleListInvoices,
   SEARCH_STAFF: handleSearchStaff,
   LIST_STAFF_ADVANCES: handleListStaffAdvances,
   SEARCH_ACCOUNTING_NOTES: handleSearchAccountingNotes

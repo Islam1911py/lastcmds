@@ -2,6 +2,15 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { db } from "@/lib/db"
+import {
+  convertAccountingNote,
+  AccountingNoteAlreadyProcessedError,
+  AccountingNoteMissingUnitError,
+  AccountingNoteNotFoundError,
+  AccountingNotePmAdvanceInsufficientError,
+  AccountingNotePmAdvanceNotFoundError,
+  AccountingNotePmAdvanceRequiredError
+} from "@/lib/accounting-note-conversion"
 
 // GET /api/accounting-notes/[id] - Get single accounting note
 export async function GET(
@@ -126,113 +135,46 @@ export async function PATCH(
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
-    // Prepare update data
-    const updateData: any = {}
-
     if (status === "CONVERTED") {
-      // Get the unit with project info
-      const unit = await db.operationalUnit.findUnique({
-        where: { id: existingNote.unitId },
-        include: { project: true }
-      })
+      const normalizedSourceType = sourceType ?? undefined
 
-      if (!unit) {
-        return NextResponse.json({ error: "Unit not found" }, { status: 404 })
-      }
-
-      // Find the OwnerAssociation for this unit
-      let ownerAssociation = await db.ownerAssociation.findUnique({
-        where: { unitId: existingNote.unitId }
-      })
-
-      if (!ownerAssociation) {
-        ownerAssociation = await db.ownerAssociation.create({
-          data: {
-            name: `Owner - ${unit.name}`,
-            unitId: existingNote.unitId,
-            phone: "",
-            email: ""
-          }
-        })
-      }
-
-      const resolvedSourceType = sourceType ?? existingNote.sourceType ?? "OFFICE_FUND"
-      const resolvedPmAdvanceId = pmAdvanceId ?? existingNote.pmAdvanceId
-
-      if (resolvedSourceType === "PM_ADVANCE" && !resolvedPmAdvanceId) {
+      if (
+        normalizedSourceType &&
+        normalizedSourceType !== "OFFICE_FUND" &&
+        normalizedSourceType !== "PM_ADVANCE"
+      ) {
         return NextResponse.json(
-          { error: "PM advance is required when using PM_ADVANCE" },
+          { error: "Invalid source type. Use OFFICE_FUND or PM_ADVANCE" },
           { status: 400 }
         )
       }
 
-      if (resolvedSourceType === "PM_ADVANCE" && resolvedPmAdvanceId) {
-        const advance = await db.pMAdvance.findUnique({ where: { id: resolvedPmAdvanceId } })
-
-        if (!advance) {
-          return NextResponse.json({ error: "PM Advance not found" }, { status: 404 })
-        }
-
-      }
-
-      const invoiceNumber = `CLM-${Date.now()}-${unit.code}`
-      const invoice = await db.invoice.create({
-        data: {
-          invoiceNumber,
-          type: "CLAIM",
-          unitId: existingNote.unitId,
-          ownerAssociationId: ownerAssociation.id,
-          amount: existingNote.amount,
-          remainingBalance: existingNote.amount
-        }
+      await convertAccountingNote({
+        noteId: normalizedId,
+        requestedSourceType: normalizedSourceType,
+        requestedPmAdvanceId: pmAdvanceId ?? null,
+        recordedByUserId: userId
       })
-
-      const expense = await db.operationalExpense.create({
-        data: {
-          unitId: existingNote.unitId,
-          description: existingNote.description,
-          amount: existingNote.amount,
-          sourceType: resolvedSourceType,
-          recordedByUserId: userId,
-          pmAdvanceId: resolvedSourceType === "PM_ADVANCE" ? resolvedPmAdvanceId : null,
-          claimInvoiceId: invoice.id
-        }
-      })
-
-      if (resolvedSourceType === "PM_ADVANCE" && resolvedPmAdvanceId) {
-        await db.pMAdvance.update({
-          where: { id: resolvedPmAdvanceId },
-          data: {
-            remainingAmount: {
-              decrement: existingNote.amount
-            }
-          }
-        })
-      }
-
-      updateData.status = "CONVERTED"
-      updateData.convertedAt = new Date()
-      updateData.convertedToExpenseId = expense.id
-      updateData.sourceType = resolvedSourceType
-      updateData.pmAdvanceId = resolvedSourceType === "PM_ADVANCE" ? resolvedPmAdvanceId : null
     } else if (status === "REJECTED") {
-      updateData.status = "REJECTED"
-      updateData.convertedAt = new Date()
+      const updateResult = await db.accountingNote.updateMany({
+        where: {
+          id: normalizedId,
+          status: "PENDING"
+        },
+        data: {
+          status: "REJECTED",
+          convertedAt: new Date()
+        }
+      })
+
+      if (!updateResult.count) {
+        return NextResponse.json(
+          { error: "Only pending notes can be rejected" },
+          { status: 409 }
+        )
+      }
     } else {
       return NextResponse.json({ error: "Invalid status. Use CONVERTED or REJECTED" }, { status: 400 })
-    }
-
-    // Update accounting note
-    await db.accountingNote.update({
-      where: { id: normalizedId },
-      data: updateData
-    })
-
-    if (updateData.convertedToExpenseId) {
-      await db.operationalExpense.update({
-        where: { id: updateData.convertedToExpenseId },
-        data: { convertedFromNoteId: updateData.convertedToExpenseId }
-      })
     }
 
     const refreshedNote = await db.accountingNote.findUnique({
@@ -277,6 +219,46 @@ export async function PATCH(
 
     return NextResponse.json(refreshedNote)
   } catch (error) {
+    if (error instanceof AccountingNoteNotFoundError) {
+      return NextResponse.json({ error: "Accounting note not found" }, { status: 404 })
+    }
+
+    if (error instanceof AccountingNoteMissingUnitError) {
+      return NextResponse.json(
+        { error: "Accounting note is missing unit information" },
+        { status: 400 }
+      )
+    }
+
+    if (error instanceof AccountingNotePmAdvanceRequiredError) {
+      return NextResponse.json(
+        { error: "PM advance is required when using PM_ADVANCE" },
+        { status: 400 }
+      )
+    }
+
+    if (error instanceof AccountingNotePmAdvanceNotFoundError) {
+      return NextResponse.json({ error: "PM Advance not found" }, { status: 404 })
+    }
+
+    if (error instanceof AccountingNotePmAdvanceInsufficientError) {
+      return NextResponse.json(
+        {
+          error: "Insufficient PM Advance balance",
+          remaining: error.remaining,
+          needed: error.needed
+        },
+        { status: 400 }
+      )
+    }
+
+    if (error instanceof AccountingNoteAlreadyProcessedError) {
+      return NextResponse.json(
+        { error: "Only pending notes can be converted" },
+        { status: 409 }
+      )
+    }
+
     console.error("Error updating accounting note:", error)
     return NextResponse.json(
       { error: "Failed to update accounting note", details: String(error) },

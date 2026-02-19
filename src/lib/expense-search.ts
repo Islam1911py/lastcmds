@@ -404,6 +404,11 @@ type ClauseBuildResult = {
   error?: string
 }
 
+type InvoiceClauseBuildResult = {
+  clause?: Prisma.InvoiceWhereInput
+  error?: string
+}
+
 function buildClause(field: string, operator: string, rawValue: string): ClauseBuildResult {
   const op = operator.toUpperCase()
   const normalizedField = field.trim().toLowerCase()
@@ -561,6 +566,208 @@ function buildClause(field: string, operator: string, rawValue: string): ClauseB
       })
     default:
       return { error: `Field ${field} is not supported in DSL filters` }
+  }
+}
+
+export function parseInvoiceFilterDsl(input: string | null | undefined): {
+  where?: Prisma.InvoiceWhereInput
+  errors: string[]
+} {
+  if (!input) {
+    return { errors: [] }
+  }
+
+  const trimmed = input.trim()
+  if (!trimmed) {
+    return { errors: [] }
+  }
+
+  const { conditions, connectors } = splitLogicalExpressions(trimmed)
+  const errors: string[] = []
+
+  if (connectors.some((connector) => connector === "OR")) {
+    errors.push("OR operator is not supported yet")
+  }
+
+  const clauses: Prisma.InvoiceWhereInput[] = []
+  const conditionPattern = /^\s*([a-zA-Z_.]+)\s*(<=|>=|!=|=|<|>|IN|NOT\s+IN)\s*(.+)$/i
+
+  for (const condition of conditions) {
+    const match = conditionPattern.exec(condition)
+
+    if (!match) {
+      errors.push(`Unable to parse condition: ${condition}`)
+      continue
+    }
+
+    const field = match[1]
+    const rawOperator = match[2].replace(/\s+/g, " ").toUpperCase()
+    const rawValue = match[3]
+
+    const { clause, error } = buildInvoiceClause(field, rawOperator, rawValue)
+    if (error) {
+      errors.push(error)
+      continue
+    }
+    if (clause) {
+      clauses.push(clause)
+    }
+  }
+
+  if (errors.length > 0 || clauses.length === 0) {
+    return { errors, where: clauses.length ? { AND: clauses } : undefined }
+  }
+
+  if (clauses.length === 1) {
+    return { errors, where: clauses[0] }
+  }
+
+  return { errors, where: { AND: clauses } }
+}
+
+function buildInvoiceClause(field: string, operator: string, rawValue: string): InvoiceClauseBuildResult {
+  const op = operator.toUpperCase()
+  const normalizedField = field.trim().toLowerCase()
+  const { value, type } = parseValueToken(rawValue)
+
+  if (value === null) {
+    return { error: `Missing value for ${field}` }
+  }
+
+  const createBooleanFilter = (column: string) => {
+    if (value === "true" || value === "false") {
+      const boolValue = value === "true"
+      switch (op) {
+        case "=":
+          return { clause: { [column]: boolValue } as any }
+        case "!=":
+          return { clause: { [column]: !boolValue } as any }
+        default:
+          return { error: `Operator ${operator} is not supported for boolean field ${field}` }
+      }
+    }
+    return { error: `${field} expects true or false` }
+  }
+
+  const createStringFilter = (
+    accessor: (value: string, operator: string) => Prisma.InvoiceWhereInput | null,
+    allowArray = false
+  ) => {
+    if (op === "IN" || op === "NOT IN") {
+      if (!allowArray) {
+        return { error: `Operator ${operator} is not supported for ${field}` }
+      }
+      const { values, error } = parseListValues(rawValue)
+      if (error) {
+        return { error }
+      }
+      const clause = accessor(JSON.stringify(values), op)
+      return clause ? { clause } : { error: `Operator ${operator} is not supported for ${field}` }
+    }
+
+    if (type !== "string") {
+      return { error: `${field} expects a string value` }
+    }
+
+    const clause = accessor(String(value), op)
+    if (!clause) {
+      return { error: `Operator ${operator} is not supported for ${field}` }
+    }
+
+    return { clause }
+  }
+
+  switch (normalizedField) {
+    case "ispaid":
+      return createBooleanFilter("isPaid")
+    case "type":
+    case "invoicetype":
+      return createStringFilter((val, operatorToken) => {
+        const normalizedValue = val.toUpperCase()
+        const mapping: Prisma.InvoiceWhereInput = {}
+        switch (operatorToken) {
+          case "=":
+            mapping.type = normalizedValue as any
+            return mapping
+          case "!=":
+            return { NOT: { type: normalizedValue as any } }
+          case "IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { type: { in: parsed.map((item) => item.toUpperCase()) as any } }
+          }
+          case "NOT IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { type: { notIn: parsed.map((item) => item.toUpperCase()) as any } }
+          }
+          default:
+            return null
+        }
+      }, true)
+    case "projectid":
+    case "project":
+      return createStringFilter((val, operatorToken) => {
+        switch (operatorToken) {
+          case "=":
+            return { unit: { projectId: val } }
+          case "!=":
+            return { NOT: { unit: { projectId: val } } }
+          case "IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { unit: { projectId: { in: parsed } } }
+          }
+          case "NOT IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { unit: { projectId: { notIn: parsed } } }
+          }
+          default:
+            return null
+        }
+      }, true)
+    case "projectname":
+      return createStringFilter((val, operatorToken) => {
+        const base = { unit: { project: { name: { equals: val, mode: "insensitive" as const } } } }
+        switch (operatorToken) {
+          case "=":
+            return base
+          case "!=":
+            return { NOT: base }
+          default:
+            return null
+        }
+      })
+    case "unitcode":
+      return createStringFilter((val, operatorToken) => {
+        const base = { unit: { code: { equals: val, mode: "insensitive" as const } } }
+        switch (operatorToken) {
+          case "=":
+            return base
+          case "!=":
+            return { NOT: base }
+          default:
+            return null
+        }
+      })
+    case "unitid":
+      return createStringFilter((val, operatorToken) => {
+        switch (operatorToken) {
+          case "=":
+            return { unitId: val }
+          case "!=":
+            return { NOT: { unitId: val } }
+          case "IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { unitId: { in: parsed } }
+          }
+          case "NOT IN": {
+            const parsed = JSON.parse(val) as string[]
+            return { unitId: { notIn: parsed } }
+          }
+          default:
+            return null
+        }
+      }, true)
+    default:
+      return { error: `Field ${field} is not supported in Invoice DSL filters` }
   }
 }
 
