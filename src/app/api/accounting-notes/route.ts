@@ -367,20 +367,44 @@ export async function PATCH(req: NextRequest) {
       console.log("✓ Owner association found:", ownerAssociation.id)
     }
 
-    // Create a CLAIM invoice for this note
-    const invoiceNumber = `CLM-${Date.now()}-${note.unit.code}`
-    console.log("🔨 Creating invoice:", invoiceNumber)
-    const invoice = await prisma.invoice.create({
-      data: {
-        invoiceNumber,
-        type: "CLAIM",
+    // Reuse existing open (unpaid) CLAIM invoice if one exists for this unit,
+    // otherwise create a new one.
+    let invoice = await prisma.invoice.findFirst({
+      where: {
         unitId: note.unitId,
-        ownerAssociationId: ownerAssociation.id,
-        amount: note.amount,
-        remainingBalance: note.amount
-      }
+        type: "CLAIM",
+        isPaid: false
+      },
+      orderBy: { issuedAt: "desc" }
     })
-    console.log("✓ Invoice created:", { id: invoice.id, invoiceNumber, amount: invoice.amount })
+
+    if (invoice) {
+      // Add the note amount to the existing open invoice
+      console.log("♻️ Reusing existing open invoice:", { id: invoice.id, invoiceNumber: invoice.invoiceNumber })
+      invoice = await prisma.invoice.update({
+        where: { id: invoice.id },
+        data: {
+          amount: { increment: note.amount },
+          remainingBalance: { increment: note.amount }
+        }
+      })
+      console.log("✓ Invoice updated:", { id: invoice.id, newAmount: invoice.amount })
+    } else {
+      // No open invoice — create a fresh one
+      const invoiceNumber = `CLM-${Date.now()}-${note.unit.code}`
+      console.log("🔨 Creating new invoice:", invoiceNumber)
+      invoice = await prisma.invoice.create({
+        data: {
+          invoiceNumber,
+          type: "CLAIM",
+          unitId: note.unitId,
+          ownerAssociationId: ownerAssociation.id,
+          amount: note.amount,
+          remainingBalance: note.amount
+        }
+      })
+      console.log("✓ New invoice created:", { id: invoice.id, invoiceNumber, amount: invoice.amount })
+    }
 
     // Create operational expense record
     console.log("🔨 Creating operational expense")

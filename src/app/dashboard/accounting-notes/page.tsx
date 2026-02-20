@@ -150,7 +150,13 @@ export default function AccountingNotesPage() {
       const response = await fetch("/api/accounting-notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(formData)
+        body: JSON.stringify({
+          projectId: selectedProjectId,
+          unitId: formData.unitId,
+          description: formData.reason,
+          amount: parseFloat(formData.amount),
+          sourceType: "OFFICE_FUND"
+        })
       })
 
       if (response.ok) {
