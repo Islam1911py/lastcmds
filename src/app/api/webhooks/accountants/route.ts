@@ -43,6 +43,7 @@ const ALLOWED_ACTIONS = [
   "PAY_PAYROLL",
   "LIST_UNIT_EXPENSES",
   "LIST_INVOICES",
+  "GET_INVOICE_DETAILS",
   "SEARCH_STAFF",
   "LIST_STAFF_ADVANCES",
   "SEARCH_ACCOUNTING_NOTES"
@@ -140,6 +141,11 @@ type ActionMap = {
     unitCode?: string | null
     limit?: number | string
     includeConverted?: boolean
+  }
+  GET_INVOICE_DETAILS: {
+    invoiceId?: string | null
+    invoiceNumber?: string | null
+    projectId?: string | null
   }
 }
 
@@ -3206,6 +3212,184 @@ async function handleListInvoices(
   }
 }
 
+async function handleGetInvoiceDetails(
+  _accountant: AccountantRecord,
+  payload: ActionMap["GET_INVOICE_DETAILS"]
+): Promise<HandlerResponse> {
+  const { invoiceId, invoiceNumber, projectId } = payload
+
+  if (!invoiceId && !invoiceNumber) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "invoiceId or invoiceNumber is required",
+        humanReadable: { ar: "يجب تحديد رقم الفاتورة (invoiceId أو invoiceNumber) لعرض التفاصيل." }
+      }
+    }
+  }
+
+  let where: Prisma.InvoiceWhereInput
+
+  if (invoiceId) {
+    where = { id: invoiceId }
+  } else {
+    where = projectId
+      ? { invoiceNumber: invoiceNumber!, unit: { projectId } }
+      : { invoiceNumber: invoiceNumber! }
+  }
+
+  const invoice = await db.invoice.findFirst({
+    where,
+    include: {
+      unit: {
+        select: {
+          id: true,
+          code: true,
+          name: true,
+          project: { select: { id: true, name: true } }
+        }
+      },
+      ownerAssociation: {
+        include: {
+          contacts: { orderBy: { createdAt: "asc" } }
+        }
+      },
+      operationalExpenses: {
+        select: {
+          id: true,
+          description: true,
+          amount: true,
+          sourceType: true,
+          recordedAt: true,
+          recordedByUser: { select: { id: true, name: true } },
+          pmAdvance: {
+            select: {
+              id: true,
+              staff: { select: { id: true, name: true } }
+            }
+          }
+        },
+        orderBy: { recordedAt: "desc" }
+      },
+      expenses: {
+        select: {
+          id: true,
+          description: true,
+          amount: true,
+          sourceType: true,
+          date: true,
+          recordedByUser: { select: { id: true, name: true } }
+        },
+        orderBy: { date: "desc" }
+      },
+      payments: {
+        select: { id: true, amount: true, createdAt: true },
+        orderBy: { createdAt: "desc" }
+      }
+    }
+  })
+
+  if (!invoice) {
+    return {
+      status: 404,
+      body: {
+        success: false,
+        error: "Invoice not found",
+        humanReadable: { ar: "لم أجد هذه الفاتورة. تأكد من الرقم وحاول مرة أخرى." },
+        issues: { invoiceId: invoiceId ?? null, invoiceNumber: invoiceNumber ?? null }
+      }
+    }
+  }
+
+  const ownerContacts = invoice.ownerAssociation?.contacts ?? []
+  const primaryPhone = ownerContacts.find((c: any) => c.type === "PHONE" && c.isPrimary)?.value ?? null
+  const primaryEmail = ownerContacts.find((c: any) => c.type === "EMAIL" && c.isPrimary)?.value ?? null
+
+  const allExpenses = [
+    ...(invoice.operationalExpenses ?? []).map((e) => ({
+      id: e.id,
+      description: e.description,
+      amount: e.amount,
+      sourceType: e.sourceType,
+      date: e.recordedAt,
+      recordedBy: (e.recordedByUser as any)?.name ?? null,
+      kind: "OPERATIONAL"
+    })),
+    ...(invoice.expenses ?? []).map((e) => ({
+      id: e.id,
+      description: e.description,
+      amount: e.amount,
+      sourceType: e.sourceType,
+      date: (e as any).date ?? null,
+      recordedBy: (e.recordedByUser as any)?.name ?? null,
+      kind: "UNIT_EXPENSE"
+    }))
+  ].sort((a, b) => {
+    const aTime = a.date ? new Date(a.date).getTime() : 0
+    const bTime = b.date ? new Date(b.date).getTime() : 0
+    return bTime - aTime
+  })
+
+  const totalExpenses = allExpenses.reduce((s, e) => s + (e.amount ?? 0), 0)
+
+  const humanReadable: HumanReadable = {
+    ar: `فاتورة ${invoice.invoiceNumber} — الوحدة ${invoice.unit?.code ?? "غير محدد"} (${invoice.unit?.project?.name ?? ""})\nالمبلغ: ${formatCurrency(invoice.amount)} جنيه | المدفوع: ${formatCurrency(invoice.totalPaid)} جنيه | المتبقي: ${formatCurrency(invoice.remainingBalance)} جنيه\nالحالة: ${invoice.isPaid ? "✅ مدفوعة" : "⏳ غير مدفوعة"}\nعدد المصروفات: ${allExpenses.length} | عدد الدفعات: ${invoice.payments?.length ?? 0}`
+  }
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      data: {
+        id: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        type: invoice.type,
+        amount: invoice.amount,
+        totalPaid: invoice.totalPaid,
+        remainingBalance: invoice.remainingBalance,
+        isPaid: invoice.isPaid,
+        issuedAt: invoice.issuedAt,
+        dueDate: invoice.dueDate ?? null,
+        unit: invoice.unit
+          ? {
+              id: invoice.unit.id,
+              code: invoice.unit.code,
+              name: invoice.unit.name,
+              project: invoice.unit.project
+            }
+          : null,
+        owner: {
+          name: invoice.ownerAssociation?.name ?? null,
+          phone: primaryPhone,
+          email: primaryEmail
+        },
+        expenses: allExpenses,
+        payments: (invoice.payments ?? []).map((p) => ({
+          id: p.id,
+          amount: p.amount,
+          paidAt: p.createdAt
+        })),
+        totals: {
+          expensesCount: allExpenses.length,
+          totalExpenses: Number(totalExpenses.toFixed(2)),
+          paymentsCount: invoice.payments?.length ?? 0
+        }
+      },
+      humanReadable,
+      suggestions: invoice.isPaid
+        ? []
+        : [
+            {
+              title: "دفع الفاتورة",
+              prompt: `ادفع الفاتورة ${invoice.invoiceNumber}`,
+              data: { invoiceId: invoice.id, remaining: invoice.remainingBalance }
+            }
+          ]
+    }
+  }
+}
+
 const HANDLERS: { [K in AllowedAction]: ActionHandler<K> } = {
   CREATE_PM_ADVANCE: handleCreatePmAdvance,
   CREATE_STAFF_ADVANCE: handleCreateStaffAdvance,
@@ -3219,7 +3403,8 @@ const HANDLERS: { [K in AllowedAction]: ActionHandler<K> } = {
   LIST_INVOICES: handleListInvoices,
   SEARCH_STAFF: handleSearchStaff,
   LIST_STAFF_ADVANCES: handleListStaffAdvances,
-  SEARCH_ACCOUNTING_NOTES: handleSearchAccountingNotes
+  SEARCH_ACCOUNTING_NOTES: handleSearchAccountingNotes,
+  GET_INVOICE_DETAILS: handleGetInvoiceDetails as ActionHandler<"GET_INVOICE_DETAILS">
 }
 
 export async function POST(req: NextRequest) {

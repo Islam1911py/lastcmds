@@ -387,8 +387,9 @@ export default function ProjectManagerDashboardPage() {
                     </div>
                   </form>
                 </DialogContent>
-              </Dialog>
-            </div>
+              </Dialog>              <Button className="w-full" variant="outline" asChild>
+                <a href="/dashboard/manager/operational-expenses">عرض جميع النفقات المسجلة</a>
+              </Button>            </div>
           </CardContent>
         </Card>
       </div>

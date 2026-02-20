@@ -5,6 +5,21 @@ import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { buildPhoneVariants } from "@/lib/phone"
 import { notifyN8nEvent } from "@/lib/n8n-notify"
 
+// Helper: get PM(s) for a project
+async function getPMsForProject(projectId: string) {
+  const assignments = await db.projectAssignment.findMany({
+    where: { projectId },
+    include: {
+      user: {
+        select: { id: true, name: true, whatsappPhone: true, role: true }
+      }
+    }
+  })
+  return assignments
+    .filter(a => a.user.role === "PROJECT_MANAGER" && a.user.whatsappPhone)
+    .map(a => ({ name: a.user.name, phone: a.user.whatsappPhone! }))
+}
+
 export async function POST(req: NextRequest) {
   const ipAddress = req.headers.get("x-forwarded-for") || "unknown"
 
@@ -173,6 +188,34 @@ export async function POST(req: NextRequest) {
       },
       requestedBy: residentName || null
     })
+
+    // Notify Project Manager(s) for this project
+    const orderProjectId = order.unit.projectId
+    if (orderProjectId) {
+      const pms = await getPMsForProject(orderProjectId)
+      if (pms.length > 0) {
+        await notifyN8nEvent("PM_NEW_DELIVERY_ORDER", {
+          pmPhones: pms,
+          deliveryOrder: {
+            id: order.id,
+            title: order.title,
+            description: order.description
+          },
+          resident: {
+            name: order.resident.name,
+            phone: order.resident.phone ?? null
+          },
+          unit: {
+            code: order.unit.code,
+            name: order.unit.name ?? null,
+            projectName: order.unit.project?.name ?? null
+          },
+          humanReadable: {
+            ar: `طلب استلام/توصيل جديد من الساكن ${order.resident.name} في الوحدة ${order.unit.code} — ${order.title}`
+          }
+        })
+      }
+    }
 
     const response = {
       success: true,

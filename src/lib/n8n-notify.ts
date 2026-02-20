@@ -4,6 +4,8 @@ interface N8nEventPayload {
     | "TICKET_UPDATED"
     | "TICKET_RESOLVED"
     | "DELIVERY_ORDER_CREATED"
+    | "PM_NEW_TICKET"
+    | "PM_NEW_DELIVERY_ORDER"
   payload: Record<string, unknown>
 }
 

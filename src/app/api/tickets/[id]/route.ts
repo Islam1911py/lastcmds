@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "next-auth"
 import { authOptions } from "@/lib/auth"
 import { db } from "@/lib/db"
+import { notifyN8nEvent } from "@/lib/n8n-notify"
 
 // GET /api/tickets/[id] - Get single ticket
 export async function GET(
@@ -121,6 +122,8 @@ export async function PATCH(
     }
 
     // Update ticket
+    const wasAlreadyDone = existingTicket.status === "DONE"
+
     const ticket = await db.ticket.update({
       where: { id },
       data: updateData,
@@ -140,6 +143,28 @@ export async function PATCH(
         }
       }
     })
+
+    // Notify resident via WhatsApp when ticket is resolved (DONE)
+    if (status === "DONE" && !wasAlreadyDone && ticket.resident?.whatsappPhone) {
+      await notifyN8nEvent("TICKET_RESOLVED", {
+        residentPhone: ticket.resident.whatsappPhone,
+        residentName: ticket.resident.name,
+        ticketNumber: `TICK-${ticket.id.substring(0, 8).toUpperCase()}`,
+        ticket: {
+          id: ticket.id,
+          title: ticket.title,
+          description: ticket.description,
+          resolution: ticket.resolution ?? null
+        },
+        unit: {
+          code: ticket.unit.code,
+          projectName: ticket.unit.project?.name ?? null
+        },
+        humanReadable: {
+          ar: `تم حل تذكرتك "${ticket.title}" في الوحدة ${ticket.unit.code}${ticket.resolution ? ` — ${ticket.resolution}` : ""}. شكراً لصبرك!`
+        }
+      })
+    }
 
     return NextResponse.json(ticket)
   } catch (error) {

@@ -35,15 +35,16 @@ export async function GET(req: NextRequest) {
         }
 
         if (assignedProjectIds.length === 0) {
-          return NextResponse.json([])
+          // No project assignments — only show notes created directly by this user
+          filters.push({ createdByUserId: session.user.id })
+        } else {
+          filters.push({
+            OR: [
+              { createdByUserId: session.user.id },
+              { projectId: { in: assignedProjectIds } }
+            ]
+          })
         }
-
-        filters.push({
-          OR: [
-            { createdByUserId: session.user.id },
-            { projectId: { in: assignedProjectIds } }
-          ]
-        })
       }
     } else if (session.user.role !== "ACCOUNTANT" && session.user.role !== "ADMIN") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })

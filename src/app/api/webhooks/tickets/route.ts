@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client"
 import { db } from "@/lib/db"
 import { verifyN8nApiKey, logWebhookEvent } from "@/lib/n8n-auth"
 import { notifyN8nEvent } from "@/lib/n8n-notify"
+import { buildPhoneVariants } from "@/lib/phone"
 
 type HumanReadable = {
   en?: string
@@ -33,6 +34,144 @@ function formatDate(date: Date | string) {
     })
   } catch {
     return parsed.toISOString().split("T")[0] ?? null
+  }
+}
+
+// Helper: get PM(s) for a project
+async function getPMsForProject(projectId: string) {
+  const assignments = await db.projectAssignment.findMany({
+    where: { projectId },
+    include: {
+      user: {
+        select: { id: true, name: true, whatsappPhone: true, role: true }
+      }
+    }
+  })
+  return assignments
+    .filter(a => a.user.role === "PROJECT_MANAGER" && a.user.whatsappPhone)
+    .map(a => ({ name: a.user.name, phone: a.user.whatsappPhone! }))
+}
+
+// GET /api/webhooks/tickets?residentPhone=+201234567890
+export async function GET(req: NextRequest) {
+  const ipAddress = req.headers.get("x-forwarded-for") || "unknown"
+
+  try {
+    const auth = await verifyN8nApiKey(req)
+    if (!auth.valid || !auth.context) {
+      return NextResponse.json(
+        { success: false, error: auth.error || "Unauthorized" },
+        { status: 401 }
+      )
+    }
+
+    if (auth.context.role !== "RESIDENT") {
+      return NextResponse.json(
+        { success: false, error: "Only residents can query their tickets" },
+        { status: 403 }
+      )
+    }
+
+    const { searchParams } = new URL(req.url)
+    const residentPhone = searchParams.get("residentPhone") || searchParams.get("phone")
+
+    if (!residentPhone) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Missing residentPhone query parameter",
+          humanReadable: { ar: "أرسل رقم واتساب الساكن في query parameter باسم residentPhone" }
+        },
+        { status: 400 }
+      )
+    }
+
+    const resident = await db.resident.findFirst({
+      where: {
+        OR: [
+          { phone: residentPhone },
+          { whatsappPhone: residentPhone }
+        ]
+      }
+    })
+
+    if (!resident) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Resident not found",
+          humanReadable: { ar: `مفيش ساكن مسجل بالرقم ${residentPhone}` }
+        },
+        { status: 404 }
+      )
+    }
+
+    const tickets = await db.ticket.findMany({
+      where: { residentId: resident.id },
+      include: {
+        unit: { include: { project: true } },
+        assignedTo: { select: { name: true } }
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10
+    })
+
+    const statusLabel: Record<string, string> = {
+      NEW: "جديدة",
+      IN_PROGRESS: "قيد التنفيذ",
+      DONE: "تم الحل"
+    }
+
+    const formattedTickets = tickets.map(t => ({
+      id: t.id,
+      ticketNumber: `TICK-${t.id.substring(0, 8).toUpperCase()}`,
+      title: t.title,
+      description: t.description,
+      status: t.status,
+      statusAr: statusLabel[t.status] ?? t.status,
+      priority: t.priority,
+      resolution: t.resolution ?? null,
+      unitCode: t.unit.code,
+      projectName: t.unit.project?.name ?? null,
+      assignedTo: t.assignedTo?.name ?? null,
+      createdAt: formatDate(t.createdAt),
+      closedAt: t.closedAt ? formatDate(t.closedAt) : null
+    }))
+
+    const openCount = tickets.filter(t => t.status !== "DONE").length
+    const doneCount = tickets.filter(t => t.status === "DONE").length
+
+    await logWebhookEvent(
+      auth.context.keyId,
+      "TICKET_CREATED",
+      "/api/webhooks/tickets",
+      "GET",
+      200,
+      { residentPhone },
+      { total: tickets.length },
+      undefined,
+      ipAddress
+    )
+
+    return NextResponse.json({
+      success: true,
+      resident: { id: resident.id, name: resident.name },
+      tickets: formattedTickets,
+      meta: {
+        total: tickets.length,
+        open: openCount,
+        done: doneCount
+      },
+      humanReadable: {
+        ar: `عندك ${tickets.length} تذاكر — ${openCount} مفتوحة، ${doneCount} محلولة`
+      }
+    })
+  } catch (error) {
+    console.error("Error fetching tickets:", error)
+    return NextResponse.json(
+      { success: false, error: "Failed to fetch tickets" },
+      { status: 500 }
+    )
   }
 }
 
@@ -102,6 +241,7 @@ export async function POST(req: NextRequest) {
       residentName,
       residentEmail,
       residentPhone,
+      senderPhone,
       unitCode,
       unitName,
       buildingNumber,
@@ -112,9 +252,16 @@ export async function POST(req: NextRequest) {
     } = body
 
     const trimmedResidentName = typeof residentName === "string" ? residentName.trim() : ""
-    const trimmedTitle = typeof title === "string" ? title.trim() : ""
     const trimmedDescription = typeof description === "string" ? description.trim() : ""
+    // title auto-generated from description if not provided
+    const rawTitle = typeof title === "string" ? title.trim() : ""
+    const trimmedTitle = rawTitle || trimmedDescription.substring(0, 100)
     const trimmedProjectName = typeof projectName === "string" ? projectName.trim() : ""
+    // senderPhone: the WhatsApp number that sent the message (may not be in DB)
+    const callerPhone =
+      (typeof senderPhone === "string" && senderPhone.trim()) ||
+      (typeof residentPhone === "string" && residentPhone.trim()) ||
+      ""
     const trimmedUnitCode =
       typeof unitCode === "string" && unitCode.trim() !== "" ? unitCode.trim() : undefined
     const trimmedBuildingNumber =
@@ -125,7 +272,8 @@ export async function POST(req: NextRequest) {
       typeof unitName === "string" && unitName.trim() !== "" ? unitName.trim() : undefined
     const requestedUnitCode = trimmedUnitCode ?? trimmedBuildingNumber
 
-    if (!trimmedResidentName || !trimmedTitle || !trimmedDescription) {
+    // Only description (or title) is required — residentName is optional for anonymous tickets
+    if (!trimmedTitle) {
       await logWebhookEvent(
         auth.context.keyId,
         "TICKET_CREATED",
@@ -134,22 +282,22 @@ export async function POST(req: NextRequest) {
         400,
         body,
         { error: "Missing required fields" },
-        "Missing: residentName, title, or description",
+        "Missing: title or description",
         ipAddress
       )
 
       return NextResponse.json(
         {
           success: false,
-          error: "Missing required fields: residentName, title, description",
+          error: "Missing required fields: title or description",
           humanReadable: {
-            en: "Need resident name, ticket title, and description to log a request.",
-            ar: "يجب إدخال اسم الساكن، العنوان، والوصف لتسجيل التذكرة."
+            en: "Need at least a description or title to log a request.",
+            ar: "يجب إدخال وصف المشكلة على الأقل لتسجيل التذكرة."
           },
           suggestions: [
             {
               title: "إعادة إرسال البيانات",
-              prompt: "أعد إرسال الطلب متضمناً اسم الساكن، عنوان واضح، ووصف للمشكلة."
+              prompt: "أعد إرسال الطلب متضمناً وصف المشكلة، رقم المبنى، واسم المشروع."
             }
           ]
         },
@@ -337,113 +485,108 @@ export async function POST(req: NextRequest) {
         : null
     }
 
-    // Find or create resident
-    let resident = await db.resident.findFirst({
-      where: {
-        AND: [
-          { name: trimmedResidentName },
-          {
-            unitId: unit.id
-          }
-        ]
-      },
-      include: {
-        unit: {
-          include: {
-            project: true
-          }
-        }
-      }
-    })
+    // Find resident — try phone first, then name, then create if name given, else anonymous
+    let resident: Prisma.ResidentGetPayload<{ include: { unit: { include: { project: true } } } }> | null = null
 
-    if (!resident) {
+    if (callerPhone) {
+      const phoneVariants = buildPhoneVariants(callerPhone)
+      resident = await db.resident.findFirst({
+        where: {
+          unitId: unit.id,
+          OR: [
+            { phone: { in: phoneVariants } },
+            { whatsappPhone: { in: phoneVariants } }
+          ]
+        },
+        include: { unit: { include: { project: true } } }
+      })
+    }
+
+    if (!resident && trimmedResidentName) {
+      resident = await db.resident.findFirst({
+        where: { name: trimmedResidentName, unitId: unit.id },
+        include: { unit: { include: { project: true } } }
+      })
+    }
+
+    if (!resident && trimmedResidentName) {
+      // Create resident record since we have a name
       resident = await db.resident.create({
         data: {
           name: trimmedResidentName,
           email: residentEmail || null,
-          phone: residentPhone || null,
+          phone: callerPhone || null,
           unitId: unit.id,
           status: "ACTIVE"
         },
-        include: {
-          unit: {
-            include: {
-              project: true
-            }
-          }
-        }
+        include: { unit: { include: { project: true } } }
       })
-    }
-
-    // Update resident contact info if provided
-    if (residentEmail || residentPhone) {
+    } else if (resident && (residentEmail || callerPhone)) {
+      // Update contact info if changed
       resident = await db.resident.update({
         where: { id: resident.id },
         data: {
           ...(residentEmail && { email: residentEmail }),
-          ...(residentPhone && { phone: residentPhone })
+          ...(callerPhone && !resident.phone && { phone: callerPhone })
         },
-        include: {
-          unit: {
-            include: {
-              project: true
-            }
-          }
-        }
+        include: { unit: { include: { project: true } } }
       })
     }
 
-    // Create ticket
+    // Determine display name (registered or anonymous)
+    const senderDisplayName = resident?.name ?? (trimmedResidentName || "ساكن (غير مسجل)")
+
+    // Create ticket — residentId is null for anonymous senders
     const ticket = await db.ticket.create({
       data: {
         title: trimmedTitle,
-        description: trimmedDescription,
+        description: trimmedDescription || trimmedTitle,
         priority: priority || "Normal",
         status: "NEW",
-        residentId: resident!.id,
-        unitId: unit.id
+        source: "WHATSAPP",
+        residentId: resident?.id ?? null,
+        unitId: unit.id,
+        isResidentKnown: !!resident,
+        // Store anonymous sender info directly on ticket
+        contactName: !resident ? (trimmedResidentName || null) : null,
+        contactPhone: !resident ? (callerPhone || null) : null
       }
     })
 
     const ticketNumber = `TICK-${ticket.id.substring(0, 8).toUpperCase()}`
-    const projectLabel = project?.name ?? unit.project?.name ?? resident!.unit.project?.name ?? null
+    const projectLabel = project?.name ?? unit.project?.name ?? resident?.unit?.project?.name ?? null
     const unitLabel = unit.name ? `${unit.code} • ${unit.name}` : unit.code
     const createdAtLabel = formatDate(ticket.createdAt)
     const priorityLabel = (priority || "Normal").toString()
 
     const humanReadable: HumanReadable = {
-      en: `New ticket ${ticketNumber} opened by ${resident!.name} for unit ${unitLabel}${projectLabel ? ` in project ${projectLabel}` : ""}. Priority: ${priorityLabel}${createdAtLabel ? ` on ${createdAtLabel}` : ""}.`,
-      ar: `تم فتح تذكرة جديدة ${ticketNumber} بواسطة ${resident!.name} للوحدة ${unitLabel}${projectLabel ? ` في مشروع ${projectLabel}` : ""}. الأولوية: ${priorityLabel}${createdAtLabel ? ` بتاريخ ${createdAtLabel}` : ""}.`
+      en: `New ticket ${ticketNumber} opened by ${senderDisplayName} for unit ${unitLabel}${projectLabel ? ` in project ${projectLabel}` : ""}. Priority: ${priorityLabel}${createdAtLabel ? ` on ${createdAtLabel}` : ""}.`,
+      ar: `تم فتح تذكرة جديدة ${ticketNumber} بواسطة ${senderDisplayName} للوحدة ${unitLabel}${projectLabel ? ` في مشروع ${projectLabel}` : ""}. الأولوية: ${priorityLabel}${createdAtLabel ? ` بتاريخ ${createdAtLabel}` : ""}.`
     }
 
     const suggestions: Suggestion[] = [
       {
         title: "تعيين فني",
-        prompt: `كلف فني مناسب للتذكرة ${ticketNumber} وحدد موعد الزيارة.` ,
-        data: {
-          ticketId: ticket.id,
-          unitId: unit.id
-        }
+        prompt: `كلف فني مناسب للتذكرة ${ticketNumber} وحدد موعد الزيارة.`,
+        data: { ticketId: ticket.id, unitId: unit.id }
       },
       {
-        title: "إبلاغ الساكن",
-        prompt: `أرسل تأكيد للساكن ${resident!.name} بأن التذكرة ${ticketNumber} تحت المتابعة.` ,
-        data: {
-          residentId: resident!.id,
-          ticketNumber
-        }
+        title: "إبلاغ المُبلِّغ",
+        prompt: `أرسل تأكيد للساكن ${senderDisplayName} بأن التذكرة ${ticketNumber} تحت المتابعة.`,
+        data: { residentId: resident?.id ?? null, ticketNumber, contactPhone: callerPhone || null }
       }
     ]
 
     const meta = {
       event: "TICKET_CREATED" as const,
-      projectId: unit.project?.id ?? project?.id ?? resident!.unit.project?.id ?? null,
+      projectId: unit.project?.id ?? project?.id ?? null,
       projectName: projectLabel,
       unitId: unit.id,
       unitCode: unit.code,
       priority: priorityLabel,
       createdAt: ticket.createdAt,
-      residentId: resident!.id
+      residentId: resident?.id ?? null,
+      isAnonymous: !resident
     }
 
     const response = {
@@ -456,17 +599,24 @@ export async function POST(req: NextRequest) {
         description: trimmedDescription,
         priority: priorityLabel,
         status: "NEW",
-        residentId: resident!.id,
+        residentId: resident?.id ?? null,
+        contactName: ticket.contactName,
+        contactPhone: ticket.contactPhone,
         unitId: unit.id,
         createdAt: ticket.createdAt
       },
-      resident: {
-        id: resident!.id,
-        name: resident!.name,
-        email: resident!.email,
-        phone: resident!.phone,
-        unitCode: resident!.unit.code
-      },
+      resident: resident
+        ? {
+            id: resident.id,
+            name: resident.name,
+            email: resident.email,
+            phone: resident.phone,
+            unitCode: resident.unit.code
+          }
+        : null,
+      anonymous: !resident
+        ? { name: trimmedResidentName || null, phone: callerPhone || null }
+        : null,
       unit: {
         id: unit.id,
         code: unit.code,
@@ -489,6 +639,37 @@ export async function POST(req: NextRequest) {
       humanReadable,
       suggestions
     })
+
+    // Notify Project Manager(s) for this project
+    if (unit.projectId) {
+      const pms = await getPMsForProject(unit.projectId)
+      if (pms.length > 0) {
+        await notifyN8nEvent("PM_NEW_TICKET", {
+          pmPhones: pms,
+          ticketNumber,
+          ticket: {
+            id: ticket.id,
+            title: trimmedTitle,
+            description: trimmedDescription || trimmedTitle,
+            priority: priorityLabel,
+            status: "NEW"
+          },
+          resident: {
+            name: senderDisplayName,
+            phone: resident?.phone ?? callerPhone ?? null,
+            isAnonymous: !resident
+          },
+          unit: {
+            code: unit.code,
+            name: unit.name ?? null,
+            projectName: unit.project?.name ?? null
+          },
+          humanReadable: {
+            ar: `تذكرة جديدة ${ticketNumber} من ${senderDisplayName} في الوحدة ${unit.code} — ${trimmedTitle}`
+          }
+        })
+      }
+    }
 
     await logWebhookEvent(
       auth.context.keyId,

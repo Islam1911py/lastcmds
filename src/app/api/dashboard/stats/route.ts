@@ -143,7 +143,19 @@ export async function GET(req: NextRequest) {
       db.payment.count(),
 
       // Pending Accounting Notes
-      Promise.resolve(0), // Skip for now - db.accountingNote may not be initialized yet
+      db.accountingNote.count({
+        where: {
+          status: "PENDING",
+          ...(role === "PROJECT_MANAGER"
+            ? {
+                OR: [
+                  { createdByUserId: session.user.id },
+                  { projectId: { in: projectIds } }
+                ]
+              }
+            : {})
+        }
+      }),
 
       // Total Staff
       db.staff.count({
