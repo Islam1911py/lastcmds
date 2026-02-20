@@ -38,7 +38,8 @@ interface PMAdvance {
   id: string
   amount: number
   remainingAmount: number
-  description: string
+  notes?: string
+  staff?: { id: string; name: string }
 }
 
 export default function AccountingNotesPage() {
@@ -69,7 +70,7 @@ export default function AccountingNotesPage() {
       setLoading(true)
       const [notesRes, pmRes] = await Promise.all([
         fetch("/api/accounting-notes"),
-        fetch("/api/technician-payments?type=advance")
+        fetch("/api/pm-advances")
       ])
 
       if (notesRes.ok) {
@@ -283,7 +284,7 @@ export default function AccountingNotesPage() {
                         .filter(pm => pm.remainingAmount >= selectedNote.amount)
                         .map(pm => (
                           <SelectItem key={pm.id} value={pm.id}>
-                            {pm.description} ({pm.remainingAmount.toLocaleString("ar-EG")} ج.م متبقي)
+                            {pm.staff?.name ?? "بدون اسم"} — {pm.remainingAmount.toLocaleString("ar-EG")} ج.م متبقي
                           </SelectItem>
                         ))}
                     </SelectContent>
