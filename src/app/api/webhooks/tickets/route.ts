@@ -95,19 +95,13 @@ export async function GET(req: NextRequest) {
       }
     })
 
-    if (!resident) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "Resident not found",
-          humanReadable: { ar: `مفيش ساكن مسجل بالرقم ${residentPhone}` }
-        },
-        { status: 404 }
-      )
-    }
+    // Build ticket query — registered resident by residentId, unregistered by contactPhone
+    const ticketWhere = resident
+      ? { residentId: resident.id }
+      : { contactPhone: residentPhone }
 
     const tickets = await db.ticket.findMany({
-      where: { residentId: resident.id },
+      where: ticketWhere,
       include: {
         unit: { include: { project: true } },
         assignedTo: { select: { name: true } }
@@ -115,6 +109,18 @@ export async function GET(req: NextRequest) {
       orderBy: { createdAt: "desc" },
       take: 10
     })
+
+    // If not registered and no tickets found by contactPhone either
+    if (!resident && tickets.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "No tickets found",
+          humanReadable: { ar: `مفيش شكاوى مسجلة بالرقم ${residentPhone}` }
+        },
+        { status: 404 }
+      )
+    }
 
     const statusLabel: Record<string, string> = {
       NEW: "جديدة",
@@ -155,7 +161,8 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      resident: { id: resident.id, name: resident.name },
+      resident: resident ? { id: resident.id, name: resident.name } : null,
+      isRegistered: !!resident,
       tickets: formattedTickets,
       meta: {
         total: tickets.length,
