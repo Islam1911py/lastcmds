@@ -208,14 +208,14 @@ Query parameter فقط:
 
 **بعد CreateTicket:**
 ```
-response.data.ticketNumber → رقم التذكرة — اذكره دائماً في الرد
+response.ticketNumber      → رقم التذكرة — اذكره دائماً في الرد
 response.humanReadable.ar  → ملخص جاهز
 response.success           → true = تم / false = فيه مشكلة
 ```
 
 **بعد GetMyTickets:**
 ```
-response.data.tickets[]    → قائمة التذاكر
+response.tickets[]         → قائمة التذاكر
 tickets[].ticketNumber     → رقم التذكرة
 tickets[].status           → الحالة: NEW / IN_PROGRESS / DONE
 tickets[].statusAr         → الحالة بالعربي: جديدة / قيد التنفيذ / تم الحل
@@ -228,7 +228,7 @@ response.meta.done         → عدد المحلولة
 
 **بعد CreateDelivery:**
 ```
-response.data.orderId      → رقم الطلب
+response.orderId           → رقم الطلب
 response.humanReadable.ar  → ملخص جاهز
 response.success           → true = تم
 ```
