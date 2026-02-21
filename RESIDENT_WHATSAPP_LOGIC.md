@@ -133,13 +133,16 @@ GET /api/webhooks/tickets?residentPhone=+201001234567
 
 **رقم الواتساب:** {{ $('identity').item.json.contact.whatsappPhone }}
 
-{% if $node["identity"].json.contact.type == "RESIDENT" %}
+{% if $node["identity"].json.contact?.type == "RESIDENT" %}
 **اسم الساكن:** {{ $node["identity"].json.contact.name }}
 **الوحدة:** {{ $node["identity"].json.contact.unit.code }}
 **المشروع:** {{ $node["identity"].json.contact.unit.project.name }}
 **Project ID:** {{ $node["identity"].json.contact.unit.project.id }}
 {% else %}
-**الساكن:** غير مسجل — اطلب منه اسم المشروع ورقم الشقة/العمارة عند الحاجة
+**الساكن:** غير مسجل في النظام — عامله كساكن عادي.
+اسأله في سؤال واحد: "اسم مشروعك إيه ورقم شقتك؟" ثم سجّل الشكوى بدون مشكلة.
+رقم الواتساب بيتحفظ تلقائياً مع الشكوى — مدير المشروع يقدر يصحح البيانات بعدين.
+لا تقل له "أنت مش مسجل" أو "مش في النظام" — فقط ساعده بشكل طبيعي.
 {% endif %}
 
 ---

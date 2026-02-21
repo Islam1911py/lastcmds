@@ -8,6 +8,9 @@ import {
   EXPENSE_SOURCE_TYPES,
   parseExpenseFilterDsl,
   parseInvoiceFilterDsl,
+  parseStaffAdvanceFilterDsl,
+  parseAccountingNoteFilterDsl,
+  parsePayrollFilterDsl,
   type ExpenseSourceType
 } from "@/lib/expense-search"
 import {
@@ -41,6 +44,7 @@ const ALLOWED_ACTIONS = [
   "PAY_INVOICE",
   "CREATE_PAYROLL",
   "PAY_PAYROLL",
+  "LIST_PAYROLLS",
   "LIST_UNIT_EXPENSES",
   "LIST_INVOICES",
   "GET_INVOICE_DETAILS",
@@ -98,6 +102,17 @@ type ActionMap = {
   PAY_PAYROLL: {
     payrollId: string
   }
+  LIST_PAYROLLS: {
+    // فلترة عامة
+    status?: "PENDING" | "PAID" | "ALL"
+    month?: string | null           // "2026-02" - شهر محدد
+    fromMonth?: string | null       // "2026-01" - بداية فترة
+    toMonth?: string | null         // "2026-03" - نهاية فترة
+    filterDsl?: string | null       // status = PENDING
+    limit?: number | string
+    // فلترة حسب المشروع - يعيد حساب الإجماليات لموظفي هذا المشروع فقط
+    projectId?: string | null
+  }
   LIST_UNIT_EXPENSES: {
     projectId?: string | null
     projectName?: string | null
@@ -121,6 +136,7 @@ type ActionMap = {
     fromDate?: string | null
     toDate?: string | null
     filterDsl?: string | null
+    search?: string | null
   }
   SEARCH_STAFF: {
     query: string
@@ -133,6 +149,7 @@ type ActionMap = {
     status?: "PENDING" | "DEDUCTED" | "ALL"
     projectId?: string | null
     limit?: number | string
+    filterDsl?: string | null
   }
   SEARCH_ACCOUNTING_NOTES: {
     query?: string | null
@@ -141,6 +158,7 @@ type ActionMap = {
     unitCode?: string | null
     limit?: number | string
     includeConverted?: boolean
+    filterDsl?: string | null
   }
   GET_INVOICE_DETAILS: {
     invoiceId?: string | null
@@ -1105,7 +1123,24 @@ async function handleListStaffAdvances(
   accountant: AccountantRecord,
   payload: ActionMap["LIST_STAFF_ADVANCES"]
 ): Promise<HandlerResponse> {
-  const { query, status, projectId, limit } = payload
+  const { query, status, projectId, limit, filterDsl } = payload
+
+  const normalizedFilterDsl = typeof filterDsl === "string" ? filterDsl.trim() : ""
+  const filterDslResult = normalizedFilterDsl
+    ? parseStaffAdvanceFilterDsl(normalizedFilterDsl)
+    : { errors: [] as string[] }
+
+  if (filterDslResult.errors.length > 0) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "Invalid filterDsl expression",
+        humanReadable: { ar: "صيغة فلتر DSL غير صحيحة. استخدم مثلاً: amount > 500" },
+        issues: { filterDsl, errors: filterDslResult.errors }
+      }
+    }
+  }
 
   const resolvedLimit = parseLimit(limit, 25, 200)
   const statusFilter = status && status !== "ALL" ? status : undefined
@@ -1172,6 +1207,10 @@ async function handleListStaffAdvances(
         ]
       }
     })
+  }
+
+  if (filterDslResult.where) {
+    whereClauses.push(filterDslResult.where as Prisma.StaffAdvanceWhereInput)
   }
 
   const where: Prisma.StaffAdvanceWhereInput =
@@ -1273,7 +1312,24 @@ async function handleSearchAccountingNotes(
   accountant: AccountantRecord,
   payload: ActionMap["SEARCH_ACCOUNTING_NOTES"]
 ): Promise<HandlerResponse> {
-  const { query, status, projectId, unitCode, limit, includeConverted } = payload
+  const { query, status, projectId, unitCode, limit, includeConverted, filterDsl } = payload
+
+  const normalizedFilterDsl = typeof filterDsl === "string" ? filterDsl.trim() : ""
+  const filterDslResult = normalizedFilterDsl
+    ? parseAccountingNoteFilterDsl(normalizedFilterDsl)
+    : { errors: [] as string[] }
+
+  if (filterDslResult.errors.length > 0) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "Invalid filterDsl expression",
+        humanReadable: { ar: "صيغة فلتر DSL غير صحيحة. مثال: amount > 500 أو status = PENDING" },
+        issues: { filterDsl, errors: filterDslResult.errors }
+      }
+    }
+  }
 
   const resolvedLimit = parseLimit(limit, 25, 150)
   const normalizedQuery = typeof query === "string" ? query.trim() : ""
@@ -1353,6 +1409,10 @@ async function handleSearchAccountingNotes(
         }
       }
     })
+  }
+
+  if (filterDslResult.where) {
+    whereClauses.push(filterDslResult.where as Prisma.AccountingNoteWhereInput)
   }
 
   const where: Prisma.AccountingNoteWhereInput =
@@ -1878,6 +1938,206 @@ async function handlePayPayroll(
       message: "Payroll marked as paid",
       humanReadable: {
         ar: "تم دفع كشف الرواتب وخصم السلف المعلقة."
+      }
+    }
+  }
+}
+
+async function handleListPayrolls(
+  _accountant: AccountantRecord,
+  payload: ActionMap["LIST_PAYROLLS"]
+): Promise<HandlerResponse> {
+  const { status, month, fromMonth, toMonth, projectId, filterDsl, limit } = payload
+
+  // ─── Validate & parse filterDsl ───────────────────────────────────────────
+  const normalizedFilterDsl = typeof filterDsl === "string" ? filterDsl.trim() : ""
+  const filterDslResult = normalizedFilterDsl
+    ? parsePayrollFilterDsl(normalizedFilterDsl)
+    : { errors: [] as string[], where: undefined }
+
+  if (filterDslResult.errors.length > 0) {
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: "Invalid filterDsl expression",
+        humanReadable: { ar: "صيغة فلتر DSL غير صحيحة. مثال: status = PENDING أو amount > 5000" },
+        issues: { filterDsl, errors: filterDslResult.errors }
+      }
+    }
+  }
+
+  const resolvedLimit = parseLimit(limit, 20, 100)
+
+  // ─── Build WHERE clauses ──────────────────────────────────────────────────
+  const whereClauses: Prisma.PayrollWhereInput[] = []
+
+  // Filter by status
+  const normalizedStatus = status && status !== "ALL" ? status : null
+  if (normalizedStatus) {
+    whereClauses.push({ status: normalizedStatus })
+  }
+
+  // Filter by exact month
+  if (month) {
+    whereClauses.push({ month: String(month).trim() })
+  }
+
+  // Filter by month range (fromMonth–toMonth) — month is stored as "YYYY-MM" string, so string comparison works
+  if (!month) {
+    const from = typeof fromMonth === "string" ? fromMonth.trim() : null
+    const to = typeof toMonth === "string" ? toMonth.trim() : null
+    if (from && to) {
+      // month >= from AND month <= to
+      whereClauses.push({ month: { gte: from } } as any)
+      whereClauses.push({ month: { lte: to } } as any)
+    } else if (from) {
+      whereClauses.push({ month: { gte: from } } as any)
+    } else if (to) {
+      whereClauses.push({ month: { lte: to } } as any)
+    }
+  }
+
+  // DSL
+  if (filterDslResult.where) {
+    whereClauses.push(filterDslResult.where)
+  }
+
+  const where: Prisma.PayrollWhereInput =
+    whereClauses.length === 0
+      ? {}
+      : whereClauses.length === 1
+        ? whereClauses[0]
+        : { AND: whereClauses }
+
+  // ─── Resolve projectId → staff IDs ────────────────────────────────────────
+  // Staff can belong to a project via TWO paths:
+  //   1. StaffProjectAssignment.projectId (compound/project staff)
+  //   2. staff.unit.projectId (staff attached to a unit in that project, e.g. pharmacy)
+  let projectStaffIds: Set<string> | null = null
+
+  if (projectId) {
+    const [byAssignment, byUnit] = await Promise.all([
+      db.staffProjectAssignment.findMany({
+        where: { projectId },
+        select: { staffId: true }
+      }),
+      db.staff.findMany({
+        where: { unit: { projectId } },
+        select: { id: true }
+      })
+    ])
+
+    projectStaffIds = new Set([
+      ...byAssignment.map((a) => a.staffId),
+      ...byUnit.map((s) => s.id)
+    ])
+  }
+
+  // ─── Query payrolls ───────────────────────────────────────────────────────
+  const payrolls = await db.payroll.findMany({
+    where,
+    take: resolvedLimit,
+    orderBy: { month: "desc" },
+    include: {
+      payrollItems: {
+        orderBy: { name: "asc" }
+      },
+      createdByUser: {
+        select: { id: true, name: true }
+      },
+      _count: {
+        select: { deductedAdvances: true }
+      }
+    }
+  })
+
+  // ─── Shape response ───────────────────────────────────────────────────────
+  const shapedPayrolls = payrolls.map((payroll) => {
+    // If project filter is active, slice items to project staff only
+    const items = projectStaffIds
+      ? payroll.payrollItems.filter((item) => projectStaffIds!.has(item.staffId))
+      : payroll.payrollItems
+
+    const projectGross = items.reduce((s, i) => s + i.salary, 0)
+    const projectAdvances = items.reduce((s, i) => s + i.advances, 0)
+    const projectNet = items.reduce((s, i) => s + i.net, 0)
+
+    return {
+      id: payroll.id,
+      month: payroll.month,
+      status: payroll.status,
+      paidAt: payroll.paidAt ?? null,
+      createdAt: payroll.createdAt,
+      createdBy: payroll.createdByUser?.name ?? null,
+      // global totals (full payroll)
+      totalGross: payroll.totalGross,
+      totalAdvances: payroll.totalAdvances,
+      totalNet: payroll.totalNet,
+      // project-scoped totals (same as global when no projectId filter)
+      scopedGross: projectStaffIds ? projectGross : payroll.totalGross,
+      scopedAdvances: projectStaffIds ? projectAdvances : payroll.totalAdvances,
+      scopedNet: projectStaffIds ? projectNet : payroll.totalNet,
+      staffCount: items.length,
+      deductedAdvancesCount: payroll._count.deductedAdvances,
+      // items — only scoped staff when projectId given
+      items: items.map((item) => ({
+        staffId: item.staffId,
+        name: item.name,
+        salary: item.salary,
+        advances: item.advances,
+        net: item.net
+      }))
+    }
+  })
+
+  // ─── Summary ──────────────────────────────────────────────────────────────
+  const totalPayrolls = shapedPayrolls.length
+  const pendingCount = shapedPayrolls.filter((p) => p.status === "PENDING").length
+  const paidCount = shapedPayrolls.filter((p) => p.status === "PAID").length
+  const grandNet = shapedPayrolls.reduce((s, p) => s + p.scopedNet, 0)
+
+  const summaryLines: string[] = [
+    `وجدت ${totalPayrolls} كشف رواتب${projectId ? " (مفلترة حسب الموظفين في هذا المشروع)" : ""}.`,
+    `• معلقة: ${pendingCount} — مدفوعة: ${paidCount}`,
+    `• إجمالي الصافي: ${formatCurrency(grandNet)} جنيه`,
+  ]
+
+  for (const p of shapedPayrolls.slice(0, 5)) {
+    const statusAr = p.status === "PAID" ? "✓ مدفوع" : "⏳ معلق"
+    summaryLines.push(
+      `- ${p.month}: ${formatCurrency(p.scopedNet)} جنيه (${p.staffCount} موظف) — ${statusAr}`
+    )
+  }
+  if (totalPayrolls > 5) summaryLines.push(`- (+${totalPayrolls - 5} كشوف إضافية) ...`)
+
+  const humanReadableAr = summaryLines.join("\n")
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      data: {
+        payrolls: shapedPayrolls,
+        summary: humanReadableAr
+      },
+      humanReadable: { ar: humanReadableAr },
+      meta: {
+        count: totalPayrolls,
+        pendingCount,
+        paidCount,
+        grandNet: Number(grandNet.toFixed(2)),
+        filters: {
+          status: status ?? "ALL",
+          month: month ?? null,
+          fromMonth: fromMonth ?? null,
+          toMonth: toMonth ?? null,
+          projectId: projectId ?? null,
+          filterDsl: filterDsl ?? null
+        },
+        projectScopedNote: projectStaffIds
+          ? `الإجماليات المعروضة محسوبة لـ ${projectStaffIds.size} موظف مرتبطين بالمشروع فقط (عبر التكليف أو الوحدة).`
+          : null
       }
     }
   }
@@ -2919,8 +3179,12 @@ async function handleListInvoices(
     limit,
     fromDate,
     toDate,
-    filterDsl
+    filterDsl,
+    search
   } = payload
+
+  const normalizedSearch =
+    typeof search === "string" && search.trim().length > 0 ? search.trim() : null
 
   const normalizedProjectName =
     typeof projectName === "string" && projectName.trim().length > 0
@@ -3108,6 +3372,16 @@ async function handleListInvoices(
 
   if (filterDslResult.where) {
     whereClauses.push(filterDslResult.where as unknown as Prisma.InvoiceWhereInput)
+  }
+
+  if (normalizedSearch) {
+    whereClauses.push({
+      OR: [
+        { invoiceNumber: { contains: normalizedSearch, mode: "insensitive" } as any },
+        { unit: { code: { contains: normalizedSearch, mode: "insensitive" } as any } },
+        { ownerAssociation: { name: { contains: normalizedSearch, mode: "insensitive" } as any } }
+      ]
+    })
   }
 
   const where: Prisma.InvoiceWhereInput =
@@ -3399,6 +3673,7 @@ const HANDLERS: { [K in AllowedAction]: ActionHandler<K> } = {
   PAY_INVOICE: handlePayInvoice,
   CREATE_PAYROLL: handleCreatePayroll,
   PAY_PAYROLL: handlePayPayroll,
+  LIST_PAYROLLS: handleListPayrolls,
   LIST_UNIT_EXPENSES: handleListUnitExpenses,
   LIST_INVOICES: handleListInvoices,
   SEARCH_STAFF: handleSearchStaff,

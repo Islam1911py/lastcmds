@@ -649,6 +649,21 @@ function buildInvoiceClause(field: string, operator: string, rawValue: string): 
     return { error: `${field} expects true or false` }
   }
 
+  const createNumericFilter = (column: keyof Prisma.InvoiceWhereInput) => {
+    if (type !== "number") {
+      return { error: `${field} expects a numeric value` }
+    }
+    switch (op) {
+      case "=": return { clause: { [column]: value } as Prisma.InvoiceWhereInput }
+      case "!=": return { clause: { NOT: { [column]: value } } as Prisma.InvoiceWhereInput }
+      case ">": return { clause: { [column]: { gt: value } } as any }
+      case ">=": return { clause: { [column]: { gte: value } } as any }
+      case "<": return { clause: { [column]: { lt: value } } as any }
+      case "<=": return { clause: { [column]: { lte: value } } as any }
+      default: return { error: `Operator ${operator} is not supported for ${field}` }
+    }
+  }
+
   const createStringFilter = (
     accessor: (value: string, operator: string) => Prisma.InvoiceWhereInput | null,
     allowArray = false
@@ -678,6 +693,8 @@ function buildInvoiceClause(field: string, operator: string, rawValue: string): 
   }
 
   switch (normalizedField) {
+    case "amount":
+      return createNumericFilter("amount")
     case "ispaid":
       return createBooleanFilter("isPaid")
     case "type":
@@ -997,4 +1014,309 @@ export function analyzeExpenseSearch(rawSearchTerm: string): ExpenseSearchAnalys
     descriptionSummary,
     tokenVariants
   }
+}
+
+export function parseStaffAdvanceFilterDsl(input: string | null | undefined): {
+  where?: Prisma.StaffAdvanceWhereInput
+  errors: string[]
+} {
+  if (!input) return { errors: [] }
+  const trimmed = input.trim()
+  if (!trimmed) return { errors: [] }
+
+  const { conditions, connectors } = splitLogicalExpressions(trimmed)
+  const errors: string[] = []
+
+  if (connectors.some((c) => c === "OR")) {
+    errors.push("OR operator is not supported yet")
+  }
+
+  const clauses: Prisma.StaffAdvanceWhereInput[] = []
+  const conditionPattern = /^\s*([a-zA-Z_.]+)\s*(<=|>=|!=|=|<|>)\s*(.+)$/i
+
+  for (const condition of conditions) {
+    const match = conditionPattern.exec(condition)
+    if (!match) {
+      errors.push(`Unable to parse condition: ${condition}`)
+      continue
+    }
+
+    const field = match[1].trim().toLowerCase()
+    const op = match[2].toUpperCase()
+    const rawValue = match[3].trim()
+    const { value, type } = parseValueToken(rawValue)
+
+    if (value === null) {
+      errors.push(`Missing value for ${field}`)
+      continue
+    }
+
+    if (field === "amount") {
+      if (type !== "number") { errors.push(`amount expects a numeric value`); continue }
+      const numVal = value as number
+      switch (op) {
+        case "=":  clauses.push({ amount: numVal }); break
+        case "!=": clauses.push({ NOT: { amount: numVal } }); break
+        case ">": clauses.push({ amount: { gt: numVal } } as any); break
+        case ">=": clauses.push({ amount: { gte: numVal } } as any); break
+        case "<":  clauses.push({ amount: { lt: numVal } } as any); break
+        case "<=": clauses.push({ amount: { lte: numVal } } as any); break
+        default: errors.push(`Operator ${op} not supported for amount`)
+      }
+    } else if (field === "date") {
+      const dateValue = new Date(String(value))
+      if (Number.isNaN(dateValue.getTime())) { errors.push(`Invalid date: ${rawValue}`); continue }
+      switch (op) {
+        case ">": clauses.push({ date: { gt: dateValue } } as any); break
+        case ">=": clauses.push({ date: { gte: dateValue } } as any); break
+        case "<":  clauses.push({ date: { lt: dateValue } } as any); break
+        case "<=": clauses.push({ date: { lte: dateValue } } as any); break
+        case "=":  clauses.push({ date: dateValue } as any); break
+        default: errors.push(`Operator ${op} not supported for date`)
+      }
+    } else {
+      errors.push(`Field ${field} is not supported in StaffAdvance DSL filters`)
+    }
+  }
+
+  if (errors.length > 0 || clauses.length === 0) {
+    return { errors, where: clauses.length ? { AND: clauses } : undefined }
+  }
+  return { errors, where: clauses.length === 1 ? clauses[0] : { AND: clauses } }
+}
+
+// ─── AccountingNote DSL ───────────────────────────────────────────────────────
+// Supported fields: amount, date (→ createdAt), status, sourcetype
+export function parseAccountingNoteFilterDsl(input: string | null | undefined): {
+  where?: Prisma.AccountingNoteWhereInput
+  errors: string[]
+} {
+  if (!input) return { errors: [] }
+  const trimmed = input.trim()
+  if (!trimmed) return { errors: [] }
+
+  const { conditions, connectors } = splitLogicalExpressions(trimmed)
+  const errors: string[] = []
+
+  if (connectors.some((c) => c === "OR")) {
+    errors.push("OR operator is not supported yet")
+  }
+
+  const clauses: Prisma.AccountingNoteWhereInput[] = []
+  const conditionPattern = /^\s*([a-zA-Z_.]+)\s*(<=|>=|!=|=|<|>)\s*(.+)$/i
+
+  for (const condition of conditions) {
+    const match = conditionPattern.exec(condition)
+    if (!match) { errors.push(`Unable to parse condition: ${condition}`); continue }
+
+    const field = match[1].trim().toLowerCase()
+    const op = match[2].toUpperCase()
+    const rawValue = match[3].trim()
+    const { value, type } = parseValueToken(rawValue)
+
+    if (value === null) { errors.push(`Missing value for ${field}`); continue }
+
+    if (field === "amount") {
+      if (type !== "number") { errors.push(`amount expects a numeric value`); continue }
+      const numVal = value as number
+      switch (op) {
+        case "=": clauses.push({ amount: numVal }); break
+        case "!=": clauses.push({ NOT: { amount: numVal } }); break
+        case ">": clauses.push({ amount: { gt: numVal } } as any); break
+        case ">=": clauses.push({ amount: { gte: numVal } } as any); break
+        case "<": clauses.push({ amount: { lt: numVal } } as any); break
+        case "<=": clauses.push({ amount: { lte: numVal } } as any); break
+        default: errors.push(`Operator ${op} not supported for amount`)
+      }
+    } else if (field === "date") {
+      const dateValue = new Date(String(value))
+      if (Number.isNaN(dateValue.getTime())) { errors.push(`Invalid date: ${rawValue}`); continue }
+      switch (op) {
+        case ">": clauses.push({ createdAt: { gt: dateValue } } as any); break
+        case ">=": clauses.push({ createdAt: { gte: dateValue } } as any); break
+        case "<": clauses.push({ createdAt: { lt: dateValue } } as any); break
+        case "<=": clauses.push({ createdAt: { lte: dateValue } } as any); break
+        case "=": clauses.push({ createdAt: dateValue } as any); break
+        default: errors.push(`Operator ${op} not supported for date`)
+      }
+    } else if (field === "status") {
+      if (op !== "=" && op !== "!=") { errors.push(`Operator ${op} not supported for status`); continue }
+      const statusVal = String(value).toUpperCase()
+      const validStatuses = ["PENDING", "CONVERTED", "REJECTED"]
+      if (!validStatuses.includes(statusVal)) {
+        errors.push(`Invalid status: ${value}. Valid: ${validStatuses.join(", ")}`); continue
+      }
+      if (op === "=") clauses.push({ status: statusVal as any })
+      else clauses.push({ NOT: { status: statusVal as any } })
+    } else if (field === "sourcetype") {
+      if (op !== "=" && op !== "!=") { errors.push(`Operator ${op} not supported for sourcetype`); continue }
+      const sourceVal = String(value).toUpperCase()
+      const validSources = ["OFFICE_FUND", "PM_ADVANCE"]
+      if (!validSources.includes(sourceVal)) {
+        errors.push(`Invalid sourceType: ${value}. Valid: ${validSources.join(", ")}`); continue
+      }
+      if (op === "=") clauses.push({ sourceType: sourceVal as any })
+      else clauses.push({ NOT: { sourceType: sourceVal as any } })
+    } else {
+      errors.push(`Field ${field} is not supported in AccountingNote DSL filters`)
+    }
+  }
+
+  if (errors.length > 0 || clauses.length === 0) {
+    return { errors, where: clauses.length ? { AND: clauses } : undefined }
+  }
+  return { errors, where: clauses.length === 1 ? clauses[0] : { AND: clauses } }
+}
+
+// ─── Ticket DSL ───────────────────────────────────────────────────────────────
+// Supported fields: date (→ createdAt), status, priority
+export function parseTicketFilterDsl(input: string | null | undefined): {
+  where?: Prisma.TicketWhereInput
+  errors: string[]
+} {
+  if (!input) return { errors: [] }
+  const trimmed = input.trim()
+  if (!trimmed) return { errors: [] }
+
+  const { conditions, connectors } = splitLogicalExpressions(trimmed)
+  const errors: string[] = []
+
+  if (connectors.some((c) => c === "OR")) {
+    errors.push("OR operator is not supported yet")
+  }
+
+  const clauses: Prisma.TicketWhereInput[] = []
+  const conditionPattern = /^\s*([a-zA-Z_.]+)\s*(<=|>=|!=|=|<|>)\s*(.+)$/i
+
+  for (const condition of conditions) {
+    const match = conditionPattern.exec(condition)
+    if (!match) { errors.push(`Unable to parse condition: ${condition}`); continue }
+
+    const field = match[1].trim().toLowerCase()
+    const op = match[2].toUpperCase()
+    const rawValue = match[3].trim()
+    const { value } = parseValueToken(rawValue)
+
+    if (value === null) { errors.push(`Missing value for ${field}`); continue }
+
+    if (field === "date") {
+      const dateValue = new Date(String(value))
+      if (Number.isNaN(dateValue.getTime())) { errors.push(`Invalid date: ${rawValue}`); continue }
+      switch (op) {
+        case ">": clauses.push({ createdAt: { gt: dateValue } } as any); break
+        case ">=": clauses.push({ createdAt: { gte: dateValue } } as any); break
+        case "<": clauses.push({ createdAt: { lt: dateValue } } as any); break
+        case "<=": clauses.push({ createdAt: { lte: dateValue } } as any); break
+        case "=": clauses.push({ createdAt: dateValue } as any); break
+        default: errors.push(`Operator ${op} not supported for date`)
+      }
+    } else if (field === "status") {
+      if (op !== "=" && op !== "!=") { errors.push(`Operator ${op} not supported for status`); continue }
+      const statusVal = String(value).toUpperCase()
+      const validStatuses = ["NEW", "IN_PROGRESS", "DONE"]
+      if (!validStatuses.includes(statusVal)) {
+        errors.push(`Invalid status: ${value}. Valid: ${validStatuses.join(", ")}`); continue
+      }
+      if (op === "=") clauses.push({ status: statusVal as any })
+      else clauses.push({ NOT: { status: statusVal as any } })
+    } else if (field === "priority") {
+      if (op !== "=" && op !== "!=") { errors.push(`Operator ${op} not supported for priority`); continue }
+      const priorityVal = String(value)
+      if (op === "=") clauses.push({ priority: { equals: priorityVal, mode: "insensitive" } as any })
+      else clauses.push({ NOT: { priority: { equals: priorityVal, mode: "insensitive" } as any } })
+    } else {
+      errors.push(`Field ${field} is not supported in Ticket DSL filters`)
+    }
+  }
+
+  if (errors.length > 0 || clauses.length === 0) {
+    return { errors, where: clauses.length ? { AND: clauses } : undefined }
+  }
+  return { errors, where: clauses.length === 1 ? clauses[0] : { AND: clauses } }
+}
+
+// ─── Payroll DSL ────────────────────────────────────────────────────────────
+// Supported fields: status, date (→ createdAt), amount/totalnet (→ totalNet), gross/totalgross (→ totalGross)
+export function parsePayrollFilterDsl(input: string | null | undefined): {
+  where?: Prisma.PayrollWhereInput
+  errors: string[]
+} {
+  if (!input) return { errors: [] }
+  const trimmed = input.trim()
+  if (!trimmed) return { errors: [] }
+
+  const { conditions, connectors } = splitLogicalExpressions(trimmed)
+  const errors: string[] = []
+
+  if (connectors.some((c) => c === "OR")) {
+    errors.push("OR operator is not supported yet")
+  }
+
+  const clauses: Prisma.PayrollWhereInput[] = []
+  const conditionPattern = /^\s*([a-zA-Z_.]+)\s*(<=|>=|!=|=|<|>)\s*(.+)$/i
+
+  for (const condition of conditions) {
+    const match = conditionPattern.exec(condition)
+    if (!match) { errors.push(`Unable to parse condition: ${condition}`); continue }
+
+    const field = match[1].trim().toLowerCase()
+    const op = match[2].toUpperCase()
+    const rawValue = match[3].trim()
+    const { value, type } = parseValueToken(rawValue)
+
+    if (value === null) { errors.push(`Missing value for ${field}`); continue }
+
+    if (field === "amount" || field === "totalnet") {
+      if (type !== "number") { errors.push(`${field} expects a numeric value`); continue }
+      const numVal = value as number
+      switch (op) {
+        case "=":  clauses.push({ totalNet: numVal }); break
+        case "!=": clauses.push({ NOT: { totalNet: numVal } }); break
+        case ">":  clauses.push({ totalNet: { gt: numVal } } as any); break
+        case ">=": clauses.push({ totalNet: { gte: numVal } } as any); break
+        case "<":  clauses.push({ totalNet: { lt: numVal } } as any); break
+        case "<=": clauses.push({ totalNet: { lte: numVal } } as any); break
+        default: errors.push(`Operator ${op} not supported for ${field}`)
+      }
+    } else if (field === "gross" || field === "totalgross") {
+      if (type !== "number") { errors.push(`${field} expects a numeric value`); continue }
+      const numVal = value as number
+      switch (op) {
+        case "=":  clauses.push({ totalGross: numVal }); break
+        case "!=": clauses.push({ NOT: { totalGross: numVal } }); break
+        case ">":  clauses.push({ totalGross: { gt: numVal } } as any); break
+        case ">=": clauses.push({ totalGross: { gte: numVal } } as any); break
+        case "<":  clauses.push({ totalGross: { lt: numVal } } as any); break
+        case "<=": clauses.push({ totalGross: { lte: numVal } } as any); break
+        default: errors.push(`Operator ${op} not supported for ${field}`)
+      }
+    } else if (field === "date") {
+      const dateValue = new Date(String(value))
+      if (Number.isNaN(dateValue.getTime())) { errors.push(`Invalid date: ${rawValue}`); continue }
+      switch (op) {
+        case ">":  clauses.push({ createdAt: { gt: dateValue } } as any); break
+        case ">=": clauses.push({ createdAt: { gte: dateValue } } as any); break
+        case "<":  clauses.push({ createdAt: { lt: dateValue } } as any); break
+        case "<=": clauses.push({ createdAt: { lte: dateValue } } as any); break
+        case "=":  clauses.push({ createdAt: dateValue } as any); break
+        default: errors.push(`Operator ${op} not supported for date`)
+      }
+    } else if (field === "status") {
+      if (op !== "=" && op !== "!=") { errors.push(`Operator ${op} not supported for status`); continue }
+      const statusVal = String(value).toUpperCase()
+      const validStatuses = ["PENDING", "PAID"]
+      if (!validStatuses.includes(statusVal)) {
+        errors.push(`Invalid status: ${value}. Valid: ${validStatuses.join(", ")}`); continue
+      }
+      if (op === "=") clauses.push({ status: statusVal as any })
+      else clauses.push({ NOT: { status: statusVal as any } })
+    } else {
+      errors.push(`Field ${field} is not supported in Payroll DSL filters`)
+    }
+  }
+
+  if (errors.length > 0 || clauses.length === 0) {
+    return { errors, where: clauses.length ? { AND: clauses } : undefined }
+  }
+  return { errors, where: clauses.length === 1 ? clauses[0] : { AND: clauses } }
 }
