@@ -490,6 +490,15 @@ AND    → و (الكل يجب أن يكون صحيح)
 حقل search: للبحث النصي الحر فقط (مثل: "سباكة"، "كهرباء"، "دهانات").
 filterDsl لا يدعم description أبداً — لو المدير ذكر نص حر استخدم search.
 
+عند استخدام LIST_PROJECT_TICKETS، استخدم filterDsl للفلترة:
+- التاريخ:  date >= 2026-01-01
+- الحالة:   status = NEW
+- الأولوية: priority = High
+- الدمج:    status = IN_PROGRESS AND priority = High
+
+قيم status للتذاكر: NEW / IN_PROGRESS / DONE
+قيم priority: Low / Medium / High
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ## الجزء 3 — بيانات الجلسة (استخدمها مباشرة)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -542,8 +551,9 @@ sourceType قيمتان فقط:
 
 ### 4. LIST_PROJECT_TICKETS
 لعرض الشكاوى والطلبات.
-إجباري: projectId — اختياري: statuses(["NEW","IN_PROGRESS","RESOLVED","CLOSED"]), unitCode, limit
-{"action":"LIST_PROJECT_TICKETS","senderPhone":"[رقم الواتساب من الجزء 3]","payload":{"projectId":"[ID]","statuses":["NEW","IN_PROGRESS"],"limit":20}}
+إجباري: projectId — اختياري: statuses(["NEW","IN_PROGRESS","RESOLVED","CLOSED"]), unitCode, filterDsl, limit
+filterDsl حقول: date (→ createdAt), status, priority
+{"action":"LIST_PROJECT_TICKETS","senderPhone":"[رقم الواتساب من الجزء 3]","payload":{"projectId":"[ID]","statuses":["NEW","IN_PROGRESS"],"filterDsl":"priority = High","limit":20}}
 
 ### 5. GET_RESIDENT_PHONE
 لجلب رقم الساكن. إجباري: projectId, unitCode
@@ -629,6 +639,14 @@ User: "اعرض مصروفات فيها كيماوية"
 ### التذاكر المفتوحة:
 User: "اعرض التذاكر المفتوحة"
 [صامت: LIST_PROJECT_TICKETS — statuses: ["NEW","IN_PROGRESS"]]
+
+### التذاكر العاجلة:
+User: "اعرض التذاكر العاجلة"
+[صامت: LIST_PROJECT_TICKETS — filterDsl: "priority = High"]
+
+### تذاكر هذا الشهر:
+User: "تذاكر فبراير"
+[صامت: LIST_PROJECT_TICKETS — filterDsl: "date >= 2026-02-01 AND date <= 2026-02-28"]
 
 ### رقم ساكن:
 User: "رقم ساكن الوحدة GH-A01"
