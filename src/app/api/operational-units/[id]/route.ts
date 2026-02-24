@@ -76,7 +76,7 @@ export async function PUT(
   }
 }
 
-// PATCH /api/operational-units/[id] - For partial updates (billing info)
+// PATCH /api/operational-units/[id] - تم التعديل لضمان أنواع البيانات (Numbers)
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -89,7 +89,7 @@ export async function PATCH(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Only ADMIN and ACCOUNTANT can update billing
+    // السماح فقط للمحاسب والآدمن بتعديل البيانات المالية
     if (session.user.role !== "ADMIN" && session.user.role !== "ACCOUNTANT") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
@@ -98,11 +98,13 @@ export async function PATCH(
     const { monthlyManagementFee, monthlyBillingDay } = body
 
     const updateData: any = {}
+    
+    // تأكدنا هنا إننا بنحول الأرقام لـ Float و Int عشان الداتابيز
     if (monthlyManagementFee !== undefined) {
-      updateData.monthlyManagementFee = monthlyManagementFee
+      updateData.monthlyManagementFee = parseFloat(monthlyManagementFee)
     }
     if (monthlyBillingDay !== undefined) {
-      updateData.monthlyBillingDay = monthlyBillingDay
+      updateData.monthlyBillingDay = parseInt(monthlyBillingDay)
     }
 
     const unit = await db.operationalUnit.update({
