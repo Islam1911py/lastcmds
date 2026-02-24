@@ -14,24 +14,22 @@ export async function POST(req: Request) {
       )
     }
 
-    // Get current day of month (1-31)
+    // --- التعديل هنا: قراءة البيانات اللي جاية من الزرار ---
+    const body = await req.json()
+    const { customAmount, customDay } = body
+
     const today = new Date()
-    const currentDay = today.getDate()
+    // لو المحاسب اختار يوم في الـ Dialog استخدمه، غير كدة استخدم يوم النهاردة
+    const targetDay = customDay ? parseInt(customDay) : today.getDate()
     const currentMonth = today.toISOString().substring(0, 7) // YYYY-MM
 
-    console.log(`[Monthly Billing] Checking for units with billing day: ${currentDay}`)
+    console.log(`[Monthly Billing] Generating for Day: ${targetDay}`)
 
-    // Find all operational units where:
-    // 1. monthlyBillingDay matches current day
-    // 2. monthlyManagementFee > 0
-    // 3. isActive = true
+    // بنجيب كل الوحدات اللي ميعاد تحصيلها هو اليوم ده
     const unitsToInvoice = await db.operationalUnit.findMany({
       where: {
         isActive: true,
-        monthlyBillingDay: currentDay,
-        monthlyManagementFee: {
-          gt: 0
-        }
+        monthlyBillingDay: targetDay,
       },
       include: {
         project: true,
@@ -39,47 +37,36 @@ export async function POST(req: Request) {
       }
     })
 
-    console.log(`[Monthly Billing] Found ${unitsToInvoice.length} units to invoice`)
-
     const invoicesCreated: any[] = []
     const skipped: any[] = []
 
     for (const unit of unitsToInvoice) {
-      // Check if invoice already exists for this unit in current month
+      // 1. نتأكد إن الفاتورة منزلتش للشقة دي في الشهر ده قبل كدة
+      const invoiceNumber = `MGT-${currentMonth}-${unit.code}`
       const existingInvoice = await db.invoice.findFirst({
         where: {
           unitId: unit.id,
-          type: "MANAGEMENT_SERVICE",
-          invoiceNumber: {
-            contains: currentMonth
-          }
+          invoiceNumber: invoiceNumber
         }
       })
 
       if (existingInvoice) {
-        console.log(`[Monthly Billing] Skipping ${unit.code} - invoice already exists`)
-        skipped.push({
-          unitCode: unit.code,
-          unitName: unit.name,
-          reason: "Invoice already exists for this month"
-        })
+        skipped.push({ unitCode: unit.code, reason: "موجودة بالفعل" })
         continue
       }
 
-      // Check if ownerAssociation exists
+      // 2. نتأكد إن فيه اتحاد ملاك (مالك) مربوط عشان نعرف نطلع الفاتورة لمين
       if (!unit.ownerAssociation) {
-        console.log(`[Monthly Billing] Skipping ${unit.code} - no owner association`)
-        skipped.push({
-          unitCode: unit.code,
-          unitName: unit.name,
-          reason: "No owner association found"
-        })
+        skipped.push({ unitCode: unit.code, reason: "لا يوجد مالك مربوط" })
         continue
       }
 
-      // Generate invoice number: MGT-YYYY-MM-{UNIT_CODE}
-      const invoiceNumber = `MGT-${currentMonth}-${unit.code}`
-      const amount = unit.monthlyManagementFee || 0
+      // 3. تحديد المبلغ: لو المحاسب كتب مبلغ في الزرار استخدمه، لو سابها فاضية خد مبلغ الشقة الأصلي
+      const amount = (customAmount && parseFloat(customAmount) > 0) 
+                     ? parseFloat(customAmount) 
+                     : (unit.monthlyManagementFee || 0)
+
+      if (amount <= 0) continue
 
       try {
         const invoice = await db.invoice.create({
@@ -93,35 +80,21 @@ export async function POST(req: Request) {
             totalPaid: 0,
             remainingBalance: amount,
             isPaid: false
-          },
-          include: {
-            unit: true,
-            ownerAssociation: true
           }
         })
 
-        console.log(`[Monthly Billing] ✓ Created invoice ${invoiceNumber} for ${unit.code}`)
         invoicesCreated.push({
           invoiceNumber: invoice.invoiceNumber,
           unitCode: unit.code,
-          unitName: unit.name,
-          amount: invoice.amount,
-          ownerName: unit.ownerAssociation.name
+          amount: invoice.amount
         })
       } catch (error) {
-        console.error(`[Monthly Billing] Error creating invoice for ${unit.code}:`, error)
-        skipped.push({
-          unitCode: unit.code,
-          unitName: unit.name,
-          reason: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`
-        })
+        console.error(`Error creating invoice for ${unit.code}:`, error)
       }
     }
 
     return NextResponse.json({
       success: true,
-      billingDay: currentDay,
-      month: currentMonth,
       summary: {
         totalUnitsChecked: unitsToInvoice.length,
         invoicesCreated: invoicesCreated.length,
@@ -133,10 +106,7 @@ export async function POST(req: Request) {
   } catch (error) {
     console.error("[Monthly Billing] Error:", error)
     return NextResponse.json(
-      { 
-        error: "Failed to generate monthly invoices",
-        details: error instanceof Error ? error.message : "Unknown error"
-      },
+      { error: "Failed to generate monthly invoices" },
       { status: 500 }
     )
   }
